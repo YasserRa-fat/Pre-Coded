@@ -5,7 +5,7 @@ from rest_framework.response import Response
 from .serializers import UserSerializer, UserModelSerializer
 from django.http import JsonResponse
 from django.db import models, connection
-from django.db.models import fields
+from django.db.models import Q
 from rest_framework import status
 import logging
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -128,7 +128,7 @@ class UserModelViewSet(viewsets.ModelViewSet):
             return self.queryset.filter(user=user)
         elif filter_type == 'other_models':
             # Return only models from other users
-            return self.queryset.exclude(user=user)
+            return self.queryset.filter(Q(visibility='public') & ~Q(user=user))
         else:
             # Default behavior: return both user's models and public models
             return self.queryset.filter(models.Q(user=user) | models.Q(visibility='public'))

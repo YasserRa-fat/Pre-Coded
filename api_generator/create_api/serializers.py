@@ -32,6 +32,16 @@ class UserModelSerializer(serializers.ModelSerializer):
         fields = ['id', 'user', 'model_name', 'fields', 'visibility', 'created_at']
         read_only_fields = ['user', 'created_at']
 
+    def validate(self, data):
+        user = self.context['request'].user
+        model_name = data.get('model_name')
+
+        # Check if the user already has a model with this name
+        if UserModel.objects.filter(user=user, model_name=model_name).exists():
+            raise serializers.ValidationError({"model_name": "You already have a model with this name."})
+
+        return data
+
     def create(self, validated_data):
         user = self.context['request'].user
         validated_data['user'] = user  # Associate the model with the current user
