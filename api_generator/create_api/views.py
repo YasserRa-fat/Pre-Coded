@@ -1,4 +1,5 @@
 # create_api/views.py
+from django.forms import ValidationError
 from rest_framework import generics,serializers
 from django.contrib.auth.models import User
 from rest_framework.response import Response
@@ -112,7 +113,6 @@ class AvailableModelsAPIView(APIView):
             models_data[model.__name__] = fields
         return Response(models_data, status=200)
 
-
 class UserModelViewSet(viewsets.ModelViewSet):
     queryset = UserModel.objects.all()
     serializer_class = UserModelSerializer
@@ -120,22 +120,21 @@ class UserModelViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        # Get the query parameter to filter models
         filter_type = self.request.query_params.get('filter_type', None)
 
         if filter_type == 'my_models':
-            # Return only the authenticated user's models
             return self.queryset.filter(user=user)
         elif filter_type == 'other_models':
-            # Return only models from other users
             return self.queryset.filter(Q(visibility='public') & ~Q(user=user))
         else:
-            # Default behavior: return both user's models and public models
-            return self.queryset.filter(models.Q(user=user) | models.Q(visibility='public'))
+            return self.queryset.filter(Q(user=user) | Q(visibility='public'))
 
     def perform_create(self, serializer):
-        serializer.save(user=self.request.user)  # Set the user automatically
-
+        try:
+                serializer.save(user=self.request.user)  # Set the user automatically
+        except ValidationError as e:
+            print("Validation error:", e.detail)
+            raise
     def update(self, request, *args, **kwargs):
         instance = self.get_object()
         serializer = self.get_serializer(instance, data=request.data, partial=True)
