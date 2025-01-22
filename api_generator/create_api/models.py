@@ -13,6 +13,6 @@ class UserModel(models.Model):
     fields = models.JSONField()  # Store fields as a JSON object
     visibility = models.CharField(max_length=10, choices=VISIBILITY_CHOICES, default='private')
     created_at = models.DateTimeField(auto_now_add=True)
-
+    full_code = models.TextField(null=True)
     def __str__(self):
         return self.model_name

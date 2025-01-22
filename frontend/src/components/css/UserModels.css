@@ -1,0 +1,97 @@
+/* UserModels.css */
+
+.user-models-container {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    margin: 20px;
+    background-color: #f0f0f0; /* Light background for contrast */
+}
+
+.cards-container {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: 20px;
+    max-width: 800px;
+    width: 100%;
+}
+
+.model-card {
+    background-color: #1e1e1e; /* Dark background for modern look */
+    color: #ffffff; /* Text color */
+    border-radius: 8px;
+    padding: 20px;
+    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.2);
+    transition: transform 0.2s, box-shadow 0.2s; /* Added box-shadow transition */
+}
+
+.model-card:hover {
+    transform: scale(1.05);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3); /* Enhanced shadow on hover */
+}
+
+.fields-container {
+    margin: 10px 0;
+    padding-left: 20px;
+    border-left: 2px solid #00aaff; /* Left border for emphasis */
+}
+
+.field {
+    margin: 8px 0;
+    display: flex;
+    justify-content: flex-start;
+    transition: background-color 0.2s; /* Added transition for background color */
+}
+
+.field:hover {
+    background-color: rgba(255, 255, 255, 0.1); /* Light hover effect */
+}
+
+/* Field color classes for modern code color scheme */
+.field-charfield { color: #ff4d4d; } /* CharField */
+.field-integerfield { color: #4d94ff; } /* IntegerField */
+.field-textfield { color: #22c55e; } /* TextField */
+.field-emailfield { color: #ff9f00; } /* EmailField */
+.field-datefield { color: #9b59b6; } /* DateField */
+.field-datetimefield { color: #1abc9c; } /* DateTimeField */
+.field-booleanfield { color: #f1c40f; } /* BooleanField */
+.field-filefield { color: #7f8c8d; } /* FileField */
+.field-imagefield { color: #e91e63; } /* ImageField */
+.field-floatfield { color: #3498db; } /* FloatField */
+.field-decimalfield { color: #2ecc71; } /* DecimalField */
+.field-slugfield { color: #8e44ad; } /* SlugField */
+.field-urlfield { color: #00bcd4; } /* URLField */
+.field-foreignkey { color: #6a5acd; } /* ForeignKey */
+.field-manytomanyfield { color: #f08080; } /* ManyToManyField */
+.field-onetoonefield { color: #f9e79f; } /* OneToOneField */
+
+.visibility-text {
+    margin-left: 5px; /* Space between "Visibility:" and the visibility text */
+    padding: 2px 5px; /* Padding around the visibility text */
+    border-radius: 4px; /* Slight rounding of corners */
+    font-weight: normal; /* Regular weight for better readability */
+}
+
+/* Optional: Add a background color to the visibility type for better emphasis */
+.visibility-public { color: #4CAF50; } /* Green for public visibility */
+.visibility-private { color: #FF9800; } /* Orange for private visibility */
+.visibility-protected { color: #2196F3; } /* Blue for protected visibility */
+
+.model-card-link {
+    text-decoration: none; /* Remove underline from links */
+    color: inherit; /* Inherit text color from parent */
+}
+
+.model-card-link:hover {
+    opacity: 0.8; /* Optional: Add hover effect to make it look interactive */
+}
+
+.field-name {
+    font-weight: bold;
+    font-family: 'Courier New', Courier, monospace;
+    margin-right: 10px;
+}
+
+.field-type {
+    font-style: italic;
+}
