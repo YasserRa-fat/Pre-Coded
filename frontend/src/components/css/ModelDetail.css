@@ -1,0 +1,37 @@
+body {
+    background-color: white !important; /* Ensure body background is black */
+    margin: 0;
+    padding: 0;
+}
+
+.model-detail-container {
+    padding: 20px;
+    background-color: #282c34 !important; /* Dark background for the main container */
+    color: white !important; /* Text color */
+}
+
+.code-snippet {
+    background-color: #1e1e1e !important; /* VS Code dark background */
+    color: #d4d4d4 !important; /* Default text color */
+    padding: 15px;
+    border-radius: 5px;
+    overflow-x: auto; /* Scroll horizontally if needed */
+    font-family: 'Courier New', Courier, monospace; /* Monospace font for code */
+}
+
+/* Target <pre> and <code> specifically */
+.code-snippet pre {
+    background-color: #1e1e1e !important; /* Ensure pre background is black */
+    color: #d4d4d4 !important; /* Ensure pre text color is correct */
+    margin: 0; /* Remove default margin */
+    padding: 1em; /* Add padding to pre */
+    overflow: auto; /* Ensure content can scroll if too long */
+    border-radius: 5px; /* Optional: Rounded corners */
+}
+
+.code-snippet code {
+    color: #d4d4d4 !important; /* Ensure code text color is correct */
+}
+section{
+    background-color: #1e1e1e !important;
+}

@@ -1,11 +1,12 @@
 # create_api/views.py
+from django.forms import ValidationError
 from rest_framework import generics,serializers
 from django.contrib.auth.models import User
 from rest_framework.response import Response
 from .serializers import UserSerializer, UserModelSerializer
 from django.http import JsonResponse
 from django.db import models, connection
-from django.db.models import fields
+from django.db.models import Q
 from rest_framework import status
 import logging
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -74,7 +75,6 @@ def create_model_view(request):
         new_model = create_model(model_name, fields)
         return JsonResponse({'status': 'Model created successfully', 'model': model_name})
 
-
 def field_types_view(request):
     all_fields = [field.__name__ for field in models.Field.__subclasses__()]
     return JsonResponse({'field_types': all_fields})
@@ -113,7 +113,6 @@ class AvailableModelsAPIView(APIView):
             models_data[model.__name__] = fields
         return Response(models_data, status=200)
 
-
 class UserModelViewSet(viewsets.ModelViewSet):
     queryset = UserModel.objects.all()
     serializer_class = UserModelSerializer
@@ -121,14 +120,24 @@ class UserModelViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        return self.queryset.filter(models.Q(user=user) | models.Q(visibility='public'))
+        filter_type = self.request.query_params.get('filter_type', None)
+
+        if filter_type == 'my_models':
+            return self.queryset.filter(user=user)
+        elif filter_type == 'other_models':
+            return self.queryset.filter(Q(visibility='public') & ~Q(user=user))
+        else:
+            return self.queryset.filter(Q(user=user) | Q(visibility='public'))
 
     def perform_create(self, serializer):
-        serializer.save(user=self.request.user)  # Set the user automatically
-   
+        try:
+                serializer.save(user=self.request.user)  # Set the user automatically
+        except ValidationError as e:
+            print("Validation error:", e.detail)
+            raise
     def update(self, request, *args, **kwargs):
         instance = self.get_object()
-        serializer = self.get_serializer(instance, data=request.data, partial=True)  # Use partial=True for partial updates
+        serializer = self.get_serializer(instance, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
         self.perform_update(serializer)
         return Response(serializer.data)

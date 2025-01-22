@@ -1,0 +1,105 @@
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    background-color: #f5f5f5; /* Set a light background color */
+    color: black; /* Ensure text color is set to a visible color */
+    font-family: Arial, sans-serif; /* Set a default font */
+}
+
+.create-user-model {
+    max-width: 600px;
+    margin: 0 auto;
+    padding: 20px;
+    background-color: #ffffff; /* White background for the form */
+    border-radius: 8px;
+}
+
+h2 {
+    text-align: center;
+}
+
+.model-name-container,
+.fields-container,
+.visibility-container {
+    margin-bottom: 20px;
+}
+
+label {
+    display: block;
+    margin-bottom: 5px;
+}
+
+input[type="text"],
+select {
+    width: 100%;
+    padding: 10px;
+    margin-top: 5px;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+}
+
+.custom-model-table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+.custom-model-table th,
+.custom-model-table td {
+    padding: 10px;
+    border: 1px solid #ddd;
+    text-align: left;
+}
+
+.add-field-button {
+    background-color: #4CAF50;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    padding: 5px 10px;
+    cursor: pointer;
+}
+
+.add-field-button:hover {
+    background-color: #45a049;
+}
+
+.success-message {
+    color: green;
+}
+
+.error-message {
+    color: red;
+}
+
+.submit-button {
+    display: block; /* Ensures it's not hidden */
+    margin: 20px 0; /* Adds some space around it */
+    padding: 10px 20px; /* Increases the size of the button */
+    background-color: #007bff; /* Adds a color */
+    color: #ffffff; /* Text color */
+    border: none; /* Removes any borders */
+    border-radius: 5px; /* Adds rounded corners */
+    cursor: pointer; /* Changes cursor on hover */
+}
+
+.submit-button:hover {
+    background-color: #0056b3;
+}
+.submit-button {
+    background-color: #4CAF50; /* Change background color */
+    color: white; /* Set text color */
+    padding: 10px 20px; /* Add some padding */
+    border: none; /* Remove default border */
+    border-radius: 5px; /* Rounded corners */
+    cursor: pointer; /* Pointer cursor on hover */
+    font-size: 16px; /* Font size */
+    transition: background-color 0.3s; /* Transition effect */
+}
+
+.submit-button:hover {
+    background-color: #45a049; /* Darker green on hover */
+}

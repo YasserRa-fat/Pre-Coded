@@ -1,0 +1,63 @@
+body {
+    background-color: white !important; /* Set background to white */
+    margin: 0; /* Remove default margin */
+    font-family: Arial, sans-serif; /* Optional: set a default font */
+}
+
+.model-name-input {
+    width: 90%;
+    padding: 8px;
+    margin: 5px 0;
+    border: 1px solid #4CAF50;
+    border-radius: 4px;
+    text-align: center;
+    transition: border-color 0.3s ease;
+}
+
+.model-name-input:focus {
+    border-color: #45a049;
+}
+
+.custom-model-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 10px;
+}
+
+.custom-model-table th,
+.custom-model-table td {
+    border: 1px solid #4CAF50;
+    padding: 10px;
+    text-align: center;
+}
+
+.model-header {
+    background-color: #e8f5e9;
+}
+
+.add-field-button {
+    padding: 5px 10px;
+    background-color: #4CAF50;
+    color: white;
+    border: none;
+    cursor: pointer;
+    border-radius: 4px;
+    transition: background-color 0.3s ease;
+}
+
+.add-field-button:hover {
+    background-color: #45a049;
+}
+
+.built-in-models-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 20px;
+}
+
+.built-in-models-table th,
+.built-in-models-table td {
+    border: 1px solid #ccc;
+    padding: 10px;
+    text-align: center;
+}
