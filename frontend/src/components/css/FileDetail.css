@@ -1,0 +1,186 @@
+/* src/components/css/ModelFileDetail.css */
+
+/* ─────────────────────────────────────────────────────
+   Colour Palette & Base
+───────────────────────────────────────────────────── */
+:root {
+  --bg-page:        #282c34;
+  --bg-editor:      #1e1e1e;
+  --border:         #444;
+  --text:           #d4d4d4;
+  --text-heading:   #fff;
+  --primary:        #3498db;
+  --primary-hover:  #2980b9;
+  --secondary:      #6c757d;
+  --secondary-hover:#5a6268;
+  --shadow:         rgba(0,0,0,0.3);
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg-page);
+  color: var(--text);
+  height: 100%;
+  font-family: 'Roboto', sans-serif;
+  overflow-x: hidden;
+}
+
+/* ─────────────────────────────────────────────────────
+   Outer Container
+───────────────────────────────────────────────────── */
+.model-file-detail-container {
+  max-width: 960px;
+  margin: 2rem auto;
+  padding: 1.5rem;
+  background: var(--bg-page);
+  box-sizing: border-box;
+}
+
+/* ─────────────────────────────────────────────────────
+   Header
+───────────────────────────────────────────────────── */
+.model-file-header {
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0.5rem;
+  margin-bottom: 1.25rem;
+}
+.model-file-header h2 {
+  margin: 0;
+  font-family: 'Courier New', Courier, monospace;
+  color: var(--text-heading);
+  font-size: 1.75rem;
+}
+
+/* ─────────────────────────────────────────────────────
+   Editor
+───────────────────────────────────────────────────── */
+.model-file-content {
+  width: 100%;
+  /* header (2rem top margin + 2rem bottom buttons) = approx 4rem, plus container padding */
+  height: calc(100vh - 160px);
+  background: var(--bg-editor);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 1rem;
+  box-sizing: border-box;
+  overflow-y: auto;
+  white-space: pre;
+  font-family: 'Source Code Pro', monospace;
+  font-size: 1rem;
+  line-height: 1.5;
+  margin-bottom: 1.5rem;
+  box-shadow: 0 4px 8px var(--shadow);
+}
+
+/* ─────────────────────────────────────────────────────
+   Button Row
+───────────────────────────────────────────────────── */
+.model-file-buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 1rem;
+}
+
+.model-file-btn {
+  padding: 0.6rem 1.2rem;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 1rem;
+  color: #fff;
+  transition: background-color 0.2s;
+}
+
+.primary-btn {
+  background-color: var(--primary);
+}
+.primary-btn:hover {
+  background-color: var(--primary-hover);
+}
+
+.secondary-btn {
+  background-color: var(--secondary);
+}
+.secondary-btn:hover {
+  background-color: var(--secondary-hover);
+}
+
+/* ─────────────────────────────────────────────────────
+   Loading / Error States
+───────────────────────────────────────────────────── */
+.model-file-loading,
+.model-file-error {
+  margin-top: 3rem;
+  text-align: center;
+  font-size: 1rem;
+  color: var(--text);
+}
+.model-file-content.code {
+  background-color: #2d2d2d;
+  color: #f8f8f2;
+  font-family: 'Courier New', Courier, monospace;
+  font-size: 0.95rem;
+  padding: 1rem;
+  border-radius: 10px;
+  min-height: 400px;
+  white-space: pre-wrap;
+  outline: none;
+  line-height: 1.5;
+  overflow-y: auto;
+  margin-bottom: 1rem;
+}
+
+.model-file-content.template {
+  background-color: #1e1e1e;
+  color: #f1f1f1;
+  font-family: Arial, sans-serif;
+  padding: 1rem;
+  border-radius: 10px;
+  min-height: 400px;
+  white-space: pre-wrap;
+  outline: none;
+  overflow-y: auto;
+  margin-bottom: 1rem;
+}
+/* FileDetail.css */
+.file-content-editor {
+  width: 100%;
+  min-height: 60vh;
+  padding: 1rem;
+  font-family: 'Courier New', monospace;
+  font-size: 14px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  resize: vertical;
+  white-space: pre-wrap;
+  tab-size: 4;
+}
+
+.model-file-buttons {
+  margin-top: 1rem;
+  display: flex;
+  gap: 1rem;
+}
+
+.model-file-btn {
+  padding: 0.5rem 1rem;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.primary-btn {
+  background-color: #007bff;
+  color: white;
+}
+
+.secondary-btn {
+  background-color: #6c757d;
+  color: white;
+}
+
+.saving {
+  opacity: 0.7;
+  cursor: not-allowed;
+}

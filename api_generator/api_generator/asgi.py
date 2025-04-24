@@ -12,5 +12,9 @@ import os
 from django.core.asgi import get_asgi_application
 
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'api_generator.settings')
+import django
+django.setup()
 
+from core.db_importer import install as install_db_finder
+install_db_finder()
 application = get_asgi_application()

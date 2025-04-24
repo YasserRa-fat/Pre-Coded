@@ -1,22 +1,47 @@
 #!/usr/bin/env python
-"""Django's command-line utility for administrative tasks."""
 import os
 import sys
 
+# 1) point at your settings
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "api_generator.settings")
+sys.path.insert(0, os.path.dirname(__file__))
 
-def main():
-    """Run administrative tasks."""
-    os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'api_generator.settings')
-    try:
-        from django.core.management import execute_from_command_line
-    except ImportError as exc:
-        raise ImportError(
-            "Couldn't import Django. Are you sure it's installed and "
-            "available on your PYTHONPATH environment variable? Did you "
-            "forget to activate a virtual environment?"
-        ) from exc
-    execute_from_command_line(sys.argv)
+# 2) install your DB importer so "import projects.project_X.apps.Y" works
+from core.db_importer import install as install_db_importer
+install_db_importer()
+
+# 3) bootstrap Django (now INSTALLED_APPS is still just the static ones)
+import django
+django.setup()
+# 3.1) dynamic DB aliases
+from core.startup import dynamic_register_databases
+dynamic_register_databases()
+
+# ─── Disable SQLite FK enforcement on each project_<id> DB ───
+from django.db import connections
+for alias in list(connections):
+    if alias.startswith("project_"):
+        # ensure the connection is open…
+        conn = connections[alias]
+        conn.ensure_connection()
+        # then turn off FK checks
+        conn.cursor().execute("PRAGMA foreign_keys = OFF;")
 
 
-if __name__ == '__main__':
-    main()
+# 4) register DB-stored apps
+from core.startup import dynamic_register_apps
+print("🔧 Registering dynamic apps from DB…")
+dynamic_register_apps()
+
+# 4.1) dump & register FS apps
+from core.startup import dynamic_register_and_dump
+print("💾 Dumping dynamic apps to disk…")
+dynamic_register_and_dump()
+# 5) create any missing tables for those newly-registered apps
+from core.migration import auto_apply_migrations
+print("🛠 Ensuring all migrations are applied…")
+auto_apply_migrations()
+
+# 6) hand off to the normal Django CLI
+from django.core.management import execute_from_command_line
+execute_from_command_line(sys.argv)

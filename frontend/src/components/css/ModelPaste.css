@@ -1,0 +1,70 @@
+/* ModelPaste.css */
+@import url('https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap');
+
+body {
+  margin: 0;
+  padding: 0;
+}
+
+/* Use a background color that is distinct from the navbar (#2c3e50) */
+.model-paste-container {
+  font-family: 'Roboto', sans-serif;
+  width: 100%;
+  min-height: 100vh;
+  background: #2a2d36; /* Lighter dark blue-gray for contrast */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem;
+}
+
+/* Improved card styling with gradient and stronger shadow */
+.model-paste-input {
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.2), rgba(255, 255, 255, 0.1));
+  backdrop-filter: blur(6px);
+  padding: 2.5rem;
+  border-radius: 15px;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.4);
+  max-width: 800px;
+  width: 100%;
+  text-align: center;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+}
+
+.model-paste-heading {
+  font-family: 'Courier New', Courier, monospace;
+  font-size: 2.8rem;
+  margin-bottom: 1.5rem;
+  color: #ecf0f1;
+}
+
+.model-paste-textarea {
+  width: 100%;
+  padding: 1rem;
+  font-size: 1rem;
+  border: 1px solid #555;
+  border-radius: 10px;
+  background: transparent;
+  color: #ecf0f1;
+  margin-bottom: 1.5rem;
+  resize: vertical;
+}
+
+.model-paste-textarea::placeholder {
+  color: #bdc3c7;
+}
+
+.model-paste-button {
+  padding: 0.9rem 2.5rem;
+  font-size: 1rem;
+  border: none;
+  background-color: #3498db;
+  color: #fff;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: background-color 0.3s ease;
+}
+
+.model-paste-button:hover {
+  background-color: #2980b9;
+}

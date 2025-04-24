@@ -1,0 +1,114 @@
+/* src/components/css/FormFileDetail.css */
+
+/* ─────────────────────────────────────────────────────
+   Outer Container
+───────────────────────────────────────────────────── */
+.form-file-detail-container {
+  max-width: 960px;
+  margin: 2rem auto;
+  padding: 1.5rem;
+  background: var(--bg-page);
+  box-sizing: border-box;
+}
+
+/* ─────────────────────────────────────────────────────
+   Header
+───────────────────────────────────────────────────── */
+.form-file-header {
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0.5rem;
+  margin-bottom: 1.25rem;
+}
+.form-file-header h2 {
+  margin: 0;
+  font-family: 'Courier New', Courier, monospace;
+  color: var(--text-heading);
+  font-size: 1.75rem;
+}
+
+/* ─────────────────────────────────────────────────────
+   Label
+───────────────────────────────────────────────────── */
+.form-file-label {
+  display: block;
+  margin-bottom: 0.75rem;
+  font-weight: bold;
+  color: var(--text);
+}
+
+/* ─────────────────────────────────────────────────────
+   Editor
+───────────────────────────────────────────────────── */
+.form-file-content {
+  width: 100%;
+  /* header + buttons + padding = approx 160px */
+  height: calc(100vh - 160px);
+  background: var(--bg-editor);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 1rem;
+  box-sizing: border-box;
+  overflow-y: auto;
+  white-space: pre;
+  font-family: 'Source Code Pro', monospace;
+  font-size: 1rem;
+  line-height: 1.5;
+  margin-bottom: 1.5rem;
+  color: var(--text);
+}
+
+/* ─────────────────────────────────────────────────────
+   Button Row
+───────────────────────────────────────────────────── */
+.form-file-buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 1rem;
+}
+
+/* ─────────────────────────────────────────────────────
+   Buttons
+───────────────────────────────────────────────────── */
+.form-file-btn {
+  padding: 0.6rem 1.2rem;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 1rem;
+  color: #fff;
+  transition: background-color 0.2s;
+}
+
+.form-file-btn.primary-btn {
+  background-color: var(--primary);
+}
+.form-file-btn.primary-btn:hover {
+  background-color: var(--primary-hover);
+}
+
+.form-file-btn.secondary-btn {
+  background-color: var(--secondary);
+}
+.form-file-btn.secondary-btn:hover {
+  background-color: var(--secondary-hover);
+}
+
+/* ─────────────────────────────────────────────────────
+   Save Status
+───────────────────────────────────────────────────── */
+.save-status {
+  margin-top: 1rem;
+  font-weight: bold;
+  color: var(--primary);
+}
+
+/* ─────────────────────────────────────────────────────
+   Loading / Error States
+───────────────────────────────────────────────────── */
+.form-file-loading,
+.form-file-error {
+  margin-top: 3rem;
+  text-align: center;
+  font-size: 1rem;
+  color: var(--text);
+}

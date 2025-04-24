@@ -1,0 +1,134 @@
+@import url('https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap');
+
+/* Base Container */
+.view-diagram-container {
+  font-family: 'Roboto', sans-serif;
+  background-color: #282c34;
+  color: #d4d4d4;
+  padding: 2rem;
+  min-height: 100vh;
+}
+
+/* Title */
+.view-diagram-title {
+  color: #fff;
+  text-align: center;
+  margin-bottom: 1rem;
+  font-family: 'Courier New', monospace;
+  font-size: 2rem;
+}
+
+/* React Flow Container */
+.react-flow-container {
+  height: 70vh;
+  background: #1e1e1e;
+  border: 1px solid #444;
+  border-radius: 8px;
+  margin-bottom: 1rem;
+}
+
+.react-flow__node {
+  background: #3b7296 !important;
+  color: #fff !important;
+  border: none !important;
+  border-radius: 8px !important;
+}
+
+.react-flow__edge-path {
+  stroke: #3498db !important;
+  stroke-width: 2px !important;
+}
+
+.react-flow__edge-text {
+  fill: #fff !important;
+  background: #3498db !important;
+  padding: 0.2rem 0.5rem !important;
+  border-radius: 4px !important;
+}
+
+/* Action Buttons */
+.action-buttons {
+  display: flex;
+  justify-content: center;
+  gap: 1rem;
+  margin-top: 1rem;
+}
+
+.primary-btn {
+  background-color: #3498db;
+  color: #fff;
+  padding: 0.8rem 2rem;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: background-color 0.3s ease;
+}
+
+.primary-btn:hover {
+  background-color: #2980b9;
+}
+
+.secondary-btn {
+  background-color: #6c757d;
+  color: #fff;
+  padding: 0.8rem 2rem;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: background-color 0.3s ease;
+}
+
+.secondary-btn:hover {
+  background-color: #5a6268;
+}
+
+/* Code Preview */
+.code-preview {
+  background: #1e1e1e;
+  padding: 1rem;
+  border-radius: 4px;
+  overflow: auto;
+  max-height: 400px;
+  margin: 1rem 0;
+}
+
+.code-preview h3 {
+  color: #fff;
+  margin-bottom: 0.5rem;
+}
+
+.code-preview pre {
+  color: #d4d4d4;
+  font-family: 'Consolas', monospace;
+  white-space: pre-wrap;
+}
+
+/* Modals */
+.modal-overlay {
+  background: rgba(0, 0, 0, 0.5);
+}
+
+.modal-container {
+  background: #282c34;
+  border: 1px solid #444;
+  color: #d4d4d4;
+}
+
+.modal-container h3 {
+  color: #fff;
+}
+
+/* Error/Empty States */
+.no-code-message {
+  color: #ff6f61;
+  text-align: center;
+  padding: 2rem;
+  font-size: 1.2rem;
+}
+
+.loading-message {
+  color: #aaa;
+  text-align: center;
+  padding: 2rem;
+  font-size: 1.2rem;
+}

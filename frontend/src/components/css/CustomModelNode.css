@@ -1,0 +1,41 @@
+/* CustomModelNode.css */
+
+/* Node Container */
+.custom-model-node {
+    min-width: 200px;
+    border: 1px solid #444; /* Dark border to match theme */
+    border-radius: 8px;
+    background: #282c34;    /* Dark background */
+    padding: 0.75rem;
+    position: relative;
+    color: #d4d4d4;         /* Light text color */
+    font-family: 'Roboto', sans-serif;
+  }
+  
+  /* Model Name Heading */
+  .custom-model-node h3 {
+    margin: 0 0 0.5rem 0;
+    font-size: 1.1rem;
+    color: #fff;            /* Brighter text for the model name */
+  }
+  
+  /* Description Text */
+  .custom-model-node p {
+    margin: 0;
+    font-size: 0.9rem;
+    color: #ccc;            /* Slightly lighter gray for descriptions */
+    line-height: 1.4;
+    font-family: 'Roboto', sans-serif;
+    /* If you want italic for AI description, remove inline style in the component
+       and use a separate class or do something like: 
+       font-style: italic; 
+    */
+  }
+  
+  /* Handles */
+  .handle-style {
+    background: #555;
+    width: 10px;
+    height: 10px;
+  }
+  

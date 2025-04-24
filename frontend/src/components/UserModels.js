@@ -81,19 +81,13 @@ const UserModels = () => {
                         <Link to={`/usermodel/${model.id}`} key={model.id} className="model-card-link">
                             <div className="model-card">
                                 <h2>{model.model_name || 'Unnamed Model'}</h2>
-                                <div className="fields-container">
-                                    {model.fields.map((fieldDetails, index) => (
-                                        fieldDetails.name ? ( // Check if the name is present
-                                            <div className="field" key={`${fieldDetails.name}-${index}`}>
-                                                <span className="field-name">
-                                                    {fieldDetails.name}
-                                                </span>
-                                                <span className={`field-type field-${fieldDetails.type ? fieldDetails.type.toLowerCase() : ''}`}>
-                                                    : {fieldDetails.type}
-                                                </span>
-                                            </div>
-                                        ) : null // Skip rendering if the name is empty
-                                    ))}
+                                {/* Display the description of the model */}
+                                <div className="model-description">
+                                    {model.description ? (
+                                        <p>{model.description}</p>
+                                    ) : (
+                                        <p>No description provided.</p>
+                                    )}
                                 </div>
                                 <div>
                                     <strong>Visibility:</strong>

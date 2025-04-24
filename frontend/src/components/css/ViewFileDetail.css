@@ -1,0 +1,125 @@
+@import url('https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap');
+
+/* Base Container */
+.view-file-detail-container {
+  font-family: 'Roboto', sans-serif;
+  background-color: #282c34;
+  color: #d4d4d4;
+  min-height: 100vh;
+  padding: 2rem;
+  box-sizing: border-box;
+}
+
+/* Header */
+.view-file-header {
+  margin-bottom: 1rem;
+  border-bottom: 1px solid #444;
+  padding-bottom: 0.5rem;
+}
+
+.view-file-header h2 {
+  margin: 0;
+  font-family: 'Courier New', Courier, monospace;
+  color: #fff;
+  font-size: 1.8rem;
+}
+
+/* Editable Code Textarea */
+.view-file-textarea {
+  width: 100%;
+  background: #1e1e1e;
+  color: #d4d4d4;
+  font-family: 'Courier New', Courier, monospace;
+  font-size: 1rem;
+  line-height: 1.4;
+  padding: 1rem;
+  border: 1px solid #444;
+  border-radius: 4px;
+  resize: vertical;
+  min-height: 300px;
+  box-sizing: border-box;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+
+/* Description Textarea */
+.view-file-description {
+  width: 100%;
+  background: #1e1e1e;
+  color: #d4d4d4;
+  font-family: 'Roboto', sans-serif;
+  font-size: 0.95rem;
+  line-height: 1.4;
+  padding: 0.75rem;
+  border: 1px solid #444;
+  border-radius: 4px;
+  resize: vertical;
+  min-height: 80px;
+  box-sizing: border-box;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  margin-top: 0.5rem;
+}
+
+/* Sections */
+.view-file-section {
+  margin-top: 1.5rem;
+}
+
+.view-file-section h3 {
+  color: #fff;
+  font-size: 1.2rem;
+  margin-bottom: 0.5rem;
+}
+
+/* Buttons */
+.view-file-buttons {
+  margin-top: 1.5rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+}
+
+.primary-btn,
+.secondary-btn {
+  padding: 0.5rem 1.2rem;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-weight: 500;
+  transition: background-color 0.2s ease;
+}
+
+.primary-btn {
+  background-color: #3498db;
+  color: #fff;
+}
+
+.primary-btn:hover {
+  background-color: #2980b9;
+}
+
+.secondary-btn {
+  background-color: #6c757d;
+  color: #fff;
+}
+
+.secondary-btn:hover {
+  background-color: #5a6268;
+}
+
+/* Loading/Error States */
+.loading,
+.error {
+  text-align: center;
+  font-size: 1.2rem;
+  margin-top: 2rem;
+}
+
+.loading {
+  color: #aaa;
+}
+
+.error {
+  color: #ff6f61;
+}

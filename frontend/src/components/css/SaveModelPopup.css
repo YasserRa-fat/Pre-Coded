@@ -1,0 +1,93 @@
+/* SaveModelPopup.css */
+
+/* Dark overlay behind the popup */
+.save-model-popup-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2000;
+}
+
+/* Popup container with your dark theme */
+.save-model-popup-container {
+  background: #282c34;
+  padding: 2rem;
+  border-radius: 8px;
+  width: 400px;
+  max-height: 90vh;
+  overflow-y: auto;
+  text-align: center;
+  color: #d4d4d4;
+  font-family: 'Roboto', sans-serif;
+}
+
+/* Title style */
+.save-model-popup-container h2 {
+  margin-bottom: 1rem;
+  font-family: 'Courier New', Courier, monospace;
+  color: #fff;
+}
+
+/* Each field wrapper */
+.save-model-field {
+  margin-bottom: 1rem;
+  text-align: left; /* or center if you prefer */
+}
+
+/* Labels */
+.save-model-field label {
+  display: block;
+  margin-bottom: 0.3rem;
+  font-size: 1rem;
+  color: #d4d4d4;
+}
+
+/* Dropdowns & inputs */
+.save-model-popup-container select,
+.save-model-popup-container input,
+.save-model-popup-container textarea {
+  width: 100%;
+  padding: 0.5rem;
+  font-size: 1rem;
+  margin-top: 0.3rem;
+  border: 1px solid #555;
+  border-radius: 4px;
+  background: #1e1e1e;
+  color: #d4d4d4;
+}
+
+/* Additional fields for new project/app creation */
+.new-project-fields,
+.new-app-fields {
+  margin-top: 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+/* Buttons */
+.save-model-buttons {
+  margin-top: 1rem;
+}
+
+.save-model-buttons button {
+  padding: 0.5rem 1rem;
+  font-size: 1rem;
+  margin: 0.5rem;
+  border: none;
+  border-radius: 4px;
+  background-color: #3498db;
+  color: #fff;
+  cursor: pointer;
+  transition: background-color 0.3s ease;
+}
+
+.save-model-buttons button:hover {
+  background-color: #2980b9;
+}

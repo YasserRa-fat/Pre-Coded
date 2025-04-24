@@ -37,14 +37,23 @@ INSTALLED_APPS = [
     'django.contrib.contenttypes',
     'django.contrib.sessions',
     'django.contrib.messages',
-    'django.contrib.staticfiles',
+    # 'django.contrib.staticfiles',
     'rest_framework',
         'rest_framework_simplejwt',
+    'core.apps.CoreConfig',
+    'projects.apps.ProjectsConfig',
 
-    'generator',
     'corsheaders',  
     'create_api',
 ]
+
+import sys
+from pathlib import Path
+DYNAMIC_APPS_PATH = Path(__file__).resolve().parent.parent / "dynamic_apps"
+sys.path.insert(0, str(DYNAMIC_APPS_PATH))
+
+
+
 
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
@@ -73,14 +82,20 @@ TEMPLATES = [
     {
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
         'DIRS': [],
-        'APP_DIRS': True,
+        'APP_DIRS': False,
         'OPTIONS': {
+             'loaders': [
+                'core.loaders.DatabaseLoader',
+                'django.template.loaders.filesystem.Loader',
+                'django.template.loaders.app_directories.Loader',
+            ],
             'context_processors': [
                 'django.template.context_processors.debug',
                 'django.template.context_processors.request',
                 'django.contrib.auth.context_processors.auth',
                 'django.contrib.messages.context_processors.messages',
             ],
+            
         },
     },
 ]
@@ -98,6 +113,8 @@ DATABASES = {
     }
 }
 
+# route project_<id>_app_label to project_<id> database
+DATABASE_ROUTERS = ['core.db_router.ProjectRouter']
 
 # Password validation
 # https://docs.djangoproject.com/en/5.1/ref/settings/#auth-password-validators
@@ -134,13 +151,21 @@ TIME_ZONE = 'UTC'
 USE_I18N = True
 
 USE_TZ = True
+STATICFILES_FINDERS = [
+    'core.db_static.DatabaseStaticFinder',
+    'django.contrib.staticfiles.finders.FileSystemFinder',
+    'django.contrib.staticfiles.finders.AppDirectoriesFinder',
+]
+
+STATICFILES_STORAGE = 'core.db_static.DatabaseStaticStorage'
 
 
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/5.1/howto/static-files/
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
-STATIC_URL = 'static/'
+STATIC_URL = '/static/'
+
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.1/ref/settings/#default-auto-field

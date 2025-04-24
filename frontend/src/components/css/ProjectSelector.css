@@ -1,0 +1,74 @@
+/* ProjectSelector.css */
+.project-selector-container {
+    padding: 2rem;
+    text-align: center;
+    background-color: #282c34;
+    color: #d4d4d4;
+  }
+  
+  .project-selector-container h2 {
+    margin-bottom: 1rem;
+    font-family: 'Courier New', Courier, monospace;
+    color: #fff;
+  }
+  
+  .project-selector-container select {
+    width: 300px;
+    padding: 0.5rem;
+    font-size: 1rem;
+    border: 1px solid #555;
+    border-radius: 4px;
+    background: #1e1e1e;
+    color: #d4d4d4;
+  }
+  
+  .project-selector-container button {
+    margin-top: 1rem;
+    padding: 0.5rem 1rem;
+    font-size: 1rem;
+    border: none;
+    border-radius: 4px;
+    background-color: #3498db;
+    color: #fff;
+    cursor: pointer;
+    transition: background-color 0.3s ease;
+  }
+  
+  .project-selector-container button:hover {
+    background-color: #2980b9;
+  }
+  
+  .project-selector-modal {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0,0,0,0.5);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    z-index: 2000;
+  }
+  
+  .project-selector-modal-content {
+    background: #282c34;
+    padding: 2rem;
+    border-radius: 8px;
+    width: 300px;
+    text-align: center;
+    color: #d4d4d4;
+  }
+  
+  .project-selector-modal-content input,
+  .project-selector-modal-content textarea {
+    width: 100%;
+    padding: 0.5rem;
+    font-size: 1rem;
+    margin-bottom: 1rem;
+    border: 1px solid #555;
+    border-radius: 4px;
+    background: #1e1e1e;
+    color: #d4d4d4;
+  }
+  

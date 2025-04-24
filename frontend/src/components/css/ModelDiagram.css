@@ -1,0 +1,225 @@
+/* Base Font & General Setup */
+@import url('https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap');
+
+body {
+  margin: 0;
+  padding: 0;
+}
+
+.model-diagram-container {
+  font-family: 'Roboto', sans-serif;
+  color: #333;
+  line-height: 1.6;
+  background-color: #fff;
+  min-height: 100vh;
+  transition: background-color 0.3s ease;
+}
+
+/* React Flow Container */
+.react-flow-container {
+  height: 70vh;
+  border: 1px solid #ddd;
+  margin-bottom: 1rem;
+  background: #f5f5f5;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.ReactFlow {
+  background: #f5f5f5 !important;
+}
+
+.ReactFlow__controls {
+  background: rgba(44, 62, 80, 0.8) !important;
+  color: white !important;
+}
+
+/* Action Buttons */
+.action-buttons {
+  display: flex;
+  justify-content: center;
+  gap: 1rem;
+  margin-top: 1rem;
+}
+
+.primary-btn {
+  padding: 0.8rem 2rem;
+  font-size: 1rem;
+  border: none;
+  cursor: pointer;
+  border-radius: 5px;
+  background-color: #3b7296; /* Blue background */
+  color: #fff; /* White text */
+  transition: background-color 0.3s ease, transform 0.3s ease;
+}
+
+.primary-btn:hover {
+  background-color: #2c3e50; /* Darker blue on hover */
+}
+
+.secondary-btn {
+  padding: 0.8rem 2rem;
+  font-size: 1rem;
+  border: none;
+  cursor: pointer;
+  border-radius: 5px;
+  background-color: #6c757d; /* Gray background */
+  color: #fff; /* White text */
+  transition: background-color 0.3s ease, transform 0.3s ease;
+}
+
+.secondary-btn:hover {
+  background-color: #5a6268; /* Darker gray on hover */
+}
+
+/* Generated Code Preview */
+.code-preview {
+  margin: 1rem;
+  background: #f5f5f5;
+  padding: 1rem;
+  border-radius: 4px;
+  overflow: auto;
+  max-height: 400px;
+}
+
+.code-preview h3 {
+  color: #000; /* Black heading */
+  margin: 0 0 0.5rem 0;
+}
+
+.code-preview pre {
+  font-family: 'Consolas', 'Courier New', monospace;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: #2c3e50; /* Dark text for code */
+}
+
+/* Modal Styles */
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.3);
+  z-index: 999;
+}
+
+.modal-container {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  background: #fff;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  padding: 1rem;
+  z-index: 1000;
+  width: 400px;
+  box-shadow: 0 2px 20px rgba(0, 0, 0, 0.2);
+}
+
+.modal-content {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 1rem;
+  margin-top: 1rem;
+}
+
+.modal-actions button {
+  padding: 0.5rem 1rem;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background-color 0.3s ease;
+}
+
+.modal-primary-btn {
+  background-color: #3b7296; /* Blue background */
+  color: #fff; /* White text */
+  border: none;
+}
+
+.modal-primary-btn:hover {
+  background-color: #2c3e50; /* Darker blue on hover */
+}
+
+.modal-secondary-btn {
+  background-color: #ccc; /* Light gray background */
+  color: #333; /* Dark gray text */
+  border: none;
+}
+
+.modal-secondary-btn:hover {
+  background-color: #bbb; /* Slightly darker gray on hover */
+}
+
+/* Save Model Popup */
+.save-model-popup {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  background: #fff;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  padding: 1rem;
+  z-index: 1000;
+  width: 400px;
+  box-shadow: 0 2px 20px rgba(0, 0, 0, 0.2);
+}
+
+.save-model-popup h3 {
+  margin: 0 0 1rem 0;
+}
+
+.save-model-popup form {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.save-model-popup button {
+  padding: 0.5rem 1rem;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+/* Overwrite Modal */
+.overwrite-modal {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  background: #fff;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  padding: 1rem;
+  z-index: 1000;
+  width: 400px;
+  box-shadow: 0 2px 20px rgba(0, 0, 0, 0.2);
+}
+
+.overwrite-modal h3 {
+  margin: 0 0 1rem 0;
+}
+
+.overwrite-modal pre {
+  background: #f5f5f5;
+  padding: 1rem;
+  border-radius: 4px;
+  overflow: auto;
+  max-height: 300px;
+}
+
+.overwrite-modal .modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 1rem;
+  margin-top: 1rem;
+}
