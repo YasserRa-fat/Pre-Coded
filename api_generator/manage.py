@@ -37,6 +37,11 @@ dynamic_register_apps()
 from core.startup import dynamic_register_and_dump
 print("💾 Dumping dynamic apps to disk…")
 dynamic_register_and_dump()
+# ... after dynamic_register_and_dump()
+from core.patch_login_views import patch_dynamic_login_views
+patch_dynamic_login_views()
+# now migrations, then runserver...
+
 # 5) create any missing tables for those newly-registered apps
 from core.migration import auto_apply_migrations
 print("🛠 Ensuring all migrations are applied…")

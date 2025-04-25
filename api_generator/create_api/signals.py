@@ -3,9 +3,11 @@ import shutil
 import tempfile
 
 from django.conf import settings
-from django.db.models.signals import post_save
+from django.db.models.signals import post_save,pre_delete
 from django.dispatch import receiver
 from django.core.management import call_command
+from create_api.models import MediaFile, Project
+from django.db import models
 
 from .models import (
     Project, App,
@@ -172,3 +174,48 @@ def rebuild_and_migrate(sender, instance, **kwargs):
     # 3) migrate on that project’s DB
     #    you must have a DATABASES['project_<id>'] entry & a router
     call_command("migrate", project_label, database=f"project_{instance.project_id}", interactive=False)
+
+
+def get_project_from_app_label(label):
+    # labels look like "project_1_users" or "project_1_posts"
+    parts = label.split("_")
+    if len(parts) >= 2 and parts[1].isdigit():
+        return Project.objects.filter(id=int(parts[1])).first()
+    return None
+
+@receiver(post_save)
+def sync_mediafile_on_save(sender, instance, **kwargs):
+    # Only care about dynamic-app models
+    label = getattr(sender._meta, "app_label", "")
+    if not label.startswith("project_"):
+        return
+
+    project = get_project_from_app_label(label)
+
+    # Inspect all FileField/ImageField on this model
+    for field in instance._meta.get_fields():
+        if isinstance(field, models.FileField):
+            file_field = getattr(instance, field.name)
+            if file_field and hasattr(file_field, "name") and file_field.name:
+                path = file_field.name  # e.g. "profile_avatar/foo.png"
+                # Upsert the MediaFile row
+                MediaFile.objects.update_or_create(
+                    path=path,
+                    defaults={
+                        "file": path,
+                        "project": project,
+                    }
+                )
+
+@receiver(pre_delete)
+def delete_mediafile_on_delete(sender, instance, **kwargs):
+    label = getattr(sender._meta, "app_label", "")
+    if not label.startswith("project_"):
+        return
+
+    # If the instance had any files, remove their MediaFile rows
+    for field in instance._meta.get_fields():
+        if isinstance(field, models.FileField):
+            file_field = getattr(instance, field.name)
+            if file_field and file_field.name:
+                MediaFile.objects.filter(path=file_field.name).delete()

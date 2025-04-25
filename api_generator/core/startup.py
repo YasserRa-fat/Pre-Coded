@@ -2,10 +2,13 @@ import os
 import importlib
 from django.conf import settings
 from django.apps import AppConfig, apps
-from create_api.models import AppFile, ModelFile
+from create_api.models import AppFile, ModelFile,SettingsFile, Project
 import errno
 from django.core.management import call_command
 from django.db import connections
+import textwrap
+
+
 def dynamic_register_apps():
     from create_api.models import App as DBApp
 
@@ -56,21 +59,7 @@ def dynamic_register_apps():
 
 
 DYNAMIC_ROOT = settings.BASE_DIR / "dynamic_apps"
-def dynamic_register_databases():
-    # copy default DB config for each Project → settings.DATABASES['project_<id>']
-    from create_api.models import Project
-    base = settings.BASE_DIR
-    default_cfg = settings.DATABASES.get('default', {}).copy()
-    for project in Project.objects.all():
-        alias = f"project_{project.id}"
-        if alias not in settings.DATABASES:
-            new_cfg = default_cfg.copy()
-            new_cfg.update({
-                'ENGINE': 'django.db.backends.sqlite3',
-                'NAME': base / f"{alias}.sqlite3",
-            })
-            settings.DATABASES[alias] = new_cfg
-            print(f"🗄️ Registered database alias '{alias}' → {new_cfg['NAME']}")
+
 
 def dynamic_register_and_dump():
     # dump each DB-defined app to disk & register it as a filesystem app
@@ -169,38 +158,64 @@ class {name.capitalize()}Config(AppConfig):
 # core/startup.py
 from django.conf import settings
 
+
 def dynamic_register_databases():
     """
-    For each Project in the default DB, inject a
-    settings.DATABASES['project_<id>'] entry (copying
-    all the default-DB settings, including TIME_ZONE,
-    CONN_HEALTH_CHECKS, etc.).
+    For each Project in the default DB:
+      • Load its stored settings.py from the SettingsFile table
+      • Exec it in isolation to extract its DATABASES dict
+      • Deep-merge that 'default' over your main default DB cfg
+      • Register as settings.DATABASES['project_<id>']
     """
-    # Import inside the function so Django has been set up
-    from create_api.models import Project
-
-    base = settings.BASE_DIR
-    default_cfg = settings.DATABASES.get('default', {}).copy()
+    # grab your real default DB conf once
+    base_default = settings.DATABASES.get('default', {}).copy()
 
     for project in Project.objects.all():
         alias = f"project_{project.id}"
-        if alias not in settings.DATABASES:
-            # Copy default settings, then override
-            new_cfg = default_cfg.copy()
-            new_cfg.update({
-                'ENGINE': 'django.db.backends.sqlite3',
-                'NAME': base / f"{alias}.sqlite3",
-            })
-            settings.DATABASES[alias] = new_cfg
-            print(f"🗄️  Registered database alias '{alias}' → {new_cfg['NAME']}")
+        if alias in settings.DATABASES:
+            continue
+
+        # 1) fetch the DB-stored settings.py
+        try:
+            sf = SettingsFile.objects.get(project=project)
+        except SettingsFile.DoesNotExist:
+            print(f"⚠️  No SettingsFile for project {project.id}; skipping.")
+            continue
+
+        raw = sf.content
+
+        # 2) exec into a clean namespace (so __file__ and imports work)
+        fake_path = os.path.join(settings.BASE_DIR, f"project_{project.id}_settings.py")
+        ns = {"__file__": fake_path}
+        exec(textwrap.dedent(raw), ns)
+
+        proj_dbs = ns.get("DATABASES", {})
+        if "default" not in proj_dbs:
+            print(f"⚠️  Project {project.id} settings have no DATABASES['default']; skipping.")
+            continue
+
+        # 3) merge your real default with the project’s override
+        merged = base_default.copy()
+        merged.update(proj_dbs["default"])
+        # ── HERE: override the NAME so it’s not the parent DB file ──
+        # assume base_default['NAME'] is a pathlib.Path or str to ".../db.sqlite3"
+        from pathlib import Path
+        parent_db = base_default.get("NAME")
+        db_dir = Path(parent_db).parent
+        merged["NAME"] = str(db_dir / f"{alias}.sqlite3")
+        # 4) register
+        settings.DATABASES[alias] = merged
+        print(f"🗄️  Registered '{alias}' → {merged.get('ENGINE')} @ {merged.get('NAME')}")
+
 
 from django.db.backends.signals import connection_created
 from django.dispatch import receiver
-
+from django.db import connections
 @receiver(connection_created)
 def disable_fk_checks(sender, connection, **kwargs):
-    # sender is the backend module, connection.alias is the DB alias
+    """
+    Turn off FK enforcement for all project_<id> connections.
+    """
     alias = getattr(connection, 'alias', None)
     if alias and alias.startswith("project_"):
-        cursor = connection.cursor()
-        cursor.execute("PRAGMA foreign_keys = OFF;")
+        connection.cursor().execute("PRAGMA foreign_keys = OFF;")

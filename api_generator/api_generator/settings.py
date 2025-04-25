@@ -63,17 +63,30 @@ REST_FRAMEWORK = {
         'rest_framework.permissions.IsAuthenticated',  # Require authentication for all views
     ],
 }
-
+AUTHENTICATION_BACKENDS = [
+    "core.backends.ProjectDBBackend",  
+    "django.contrib.auth.backends.ModelBackend",
+]
 
 MIDDLEWARE = [
-    'django.middleware.security.SecurityMiddleware',
+    # 1) detect project-alias first
+    'core.middleware.ProjectDBMiddleware',
+
+    # 2) patch register/login to write into the project DB and record alias
+    'core.middleware.PatchRegisterAndLoginMiddleware',
+
+    # 3) Django’s built-in session & auth middlewares
     'django.contrib.sessions.middleware.SessionMiddleware',
+    'django.contrib.auth.middleware.AuthenticationMiddleware',
+
+    # 4) now re-hydrate request.user from project DB
+    'core.middleware.ProjectSessionAuthMiddleware',
+
+    # your other middleware…
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
-    'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
-    'django.middleware.clickjacking.XFrameOptionsMiddleware',
-    'corsheaders.middleware.CorsMiddleware',
+    # … etc.
 ]
 
 ROOT_URLCONF = 'api_generator.urls'
@@ -171,3 +184,4 @@ STATIC_URL = '/static/'
 # https://docs.djangoproject.com/en/5.1/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+DEFAULT_FILE_STORAGE = 'core.db_media.HybridMediaStorage'

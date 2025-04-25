@@ -20,12 +20,15 @@ def serve_db_static(request, path):
 
 def serve_db_media(request, path):
     """
-    Serve an uploaded media file out of the DB for any URL /media/<path>.
+    Serve /media/<path> by loading the file out of our MediaFile model.
     """
     try:
-        rec = MediaFile.objects.get(path=path)
+        record = MediaFile.objects.get(path=path)
     except MediaFile.DoesNotExist:
-        raise Http404(f"No media file found for {path!r}")
-    f = rec.file.open('rb')
-    content_type, _ = mimetypes.guess_type(path)
-    return FileResponse(f, content_type=content_type or 'application/octet-stream')
+        raise Http404(f"No media file for {path!r}")
+
+    # record.file is a FieldFile, so we can open() and stream it
+    file_obj = record.file.open('rb')
+    return FileResponse(file_obj, 
+                        content_type=record.file.file.content_type  
+                        if hasattr(record.file.file, 'content_type') else None)
