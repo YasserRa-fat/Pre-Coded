@@ -16,6 +16,7 @@
     "react-dnd": "^16.0.1",
     "react-dnd-html5-backend": "^16.0.1",
     "react-dom": "^18.3.1",
+    "react-draggable": "^4.4.6",
     "react-flow-renderer": "^10.3.17",
     "react-router-dom": "^6.26.2",
     "react-scripts": "5.0.1",
@@ -29,7 +30,8 @@
     "start": "react-scripts start",
     "build": "react-scripts build",
     "test": "react-scripts test",
-    "eject": "react-scripts eject"
+    "eject": "react-scripts eject",
+    "build:floating-bot": "npx esbuild src/floating-bot/index.js --bundle --outfile=build/static/js/floating-bot.js --minify --loader:.js=jsx"
   },
   "eslintConfig": {
     "extends": [
@@ -48,5 +50,8 @@
       "last 1 firefox version",
       "last 1 safari version"
     ]
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.3"
   }
 }

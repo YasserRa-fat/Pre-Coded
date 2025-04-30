@@ -1,24 +1,37 @@
 import React, { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useParams } from 'react-router-dom';
 import api from '../api';
-import "./css/Login.css"; // Import the new CSS file
+import "./css/Login.css";
 
 const Login = () => {
   const [formData, setFormData] = useState({ username: '', password: '' });
-  const [error, setError] = useState('');
-  const navigate = useNavigate();
+  const [error, setError]         = useState('');
+  const navigate                  = useNavigate();
+  const { projectId }             = useParams();
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    setError('');
     try {
-      const response = await api.post('/token/', formData);
-      localStorage.setItem('access_token', response.data.access);
-      localStorage.setItem('refresh_token', response.data.refresh);
-      console.log('Logged in:', response.data);
-      navigate('/'); // Redirect to /
+      const { data } = await api.post('/token/', formData);
+      localStorage.setItem('access_token',  data.access);
+      localStorage.setItem('refresh_token', data.refresh);
+      console.log('Logged in:', data);
+
+      if (projectId) {
+        navigate(`/projects/${projectId}/`, { replace: true });
+      } else {
+        navigate('/', { replace: true });
+      }
     } catch (err) {
+      // only read status if it exists
+      const status = err.response?.status;
+      if (status === 401) {
+        setError('Invalid login credentials');
+      } else {
+        setError('Network error—please try again');
+      }
       console.error(err);
-      setError('Invalid login credentials');
     }
   };
 

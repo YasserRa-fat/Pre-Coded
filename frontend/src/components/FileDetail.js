@@ -29,6 +29,9 @@ const FileDetail = ({ apiBase: propApiBase, displayPathPrefix: propDisplayPrefix
       'app-files': `/api/apps/${appId}/app-files/${fileId}/`,
       'settings-files': `/api/settings-files/${fileId}/`,
       'project-files': `/api/project-files/${fileId}/`,
+        'app-files': appId
+    ? `/api/projects/${projectId}/apps/${appId}/app-files/${fileId}/`
+    : `/api/app-files/${fileId}/`,   // fallback if you ever hit it without a project
       'default': appId ? `/api/apps/${appId}/${apiBase}/${fileId}/` 
                        : `/api/projects/${projectId}/${apiBase}/${fileId}/`
     };

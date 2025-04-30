@@ -680,3 +680,4 @@ Example format:
         return ["Error: Max retries exceeded."] * len(forms_data)
     except requests.exceptions.RequestException as e:
         return [f"Error generating AI summary: {str(e)}"] * len(forms_data) 
+    

@@ -152,30 +152,35 @@ def create_app_skeleton(sender, instance, created, **kwargs):
                     print(f"Writing {rel} as {model.__name__} for app {instance.name}")
                     write_codefile(model, instance.project, instance, rel, real, is_project_file=False, **extra)
 
+from core.startup import dynamic_register_apps, dynamic_register_and_dump
+from django.db import transaction
+
 @receiver(post_save, sender=ModelFile)
-def rebuild_and_migrate(sender, instance, **kwargs):
+def rebuild_and_migrate(sender, instance, created, **kwargs):
     """
     Whenever a ModelFile is changed in the DB:
       1) rewrite models.py on disk
       2) makemigrations for that app
       3) migrate that app’s database
     """
-    # 1) dump all dynamic apps (rewrites models.py)
-    from core.startup import dynamic_register_and_dump, dynamic_register_apps
+    # 1) re-register & dump the dynamic apps so the new models.py is on disk
     dynamic_register_apps()
     dynamic_register_and_dump()
 
+    # We only want to run makemigrations/migrate after the current DB transaction commits
+    transaction.on_commit(lambda: _make_and_apply(instance))
+
+
+def _make_and_apply(instance):
     # derive the django app label, e.g. project_1_posts
-    project_label = f"project_{instance.project_id}_{instance.app.name}"
+    label = f"project_{instance.project_id}_{instance.app.name}"
+    db_alias = f"project_{instance.project_id}"
 
-    # 2) makemigrations for that one app
-    call_command("makemigrations", project_label, interactive=False)
+    # 2) generate a new migration for just that app
+    call_command("makemigrations", label, interactive=False, verbosity=1)
 
-    # 3) migrate on that project’s DB
-    #    you must have a DATABASES['project_<id>'] entry & a router
-    call_command("migrate", project_label, database=f"project_{instance.project_id}", interactive=False)
-
-
+    # 3) apply it to that project’s DB
+    call_command("migrate", label, database=db_alias, interactive=False, verbosity=1)
 def get_project_from_app_label(label):
     # labels look like "project_1_users" or "project_1_posts"
     parts = label.split("_")

@@ -1,16 +1,13 @@
-# core/middleware.py
-
 import inspect
 import re
 from django import forms
 from django.contrib import messages
-from django.contrib.auth import get_user_model, login
-from django.contrib.auth.forms import UserCreationForm
-from django.contrib.auth.models import User
+from django.contrib.auth import get_user_model, login, logout, SESSION_KEY, BACKEND_SESSION_KEY
+from django.contrib.auth.forms import UserCreationForm, AuthenticationForm
+from django.contrib.auth.models import AnonymousUser
 from django.contrib.auth.views import LoginView
 from django.views.generic import FormView
-from django.contrib.auth import SESSION_KEY, BACKEND_SESSION_KEY
-
+from django.contrib.auth import logout, SESSION_KEY, BACKEND_SESSION_KEY
 
 class ProjectDBMiddleware:
     """
@@ -30,10 +27,7 @@ class ProjectDBMiddleware:
 
 class PatchRegisterAndLoginMiddleware:
     """
-    1) Monkey-patch the DB-loaded RegisterView so it sets user.backend before login().
-    2) Patch any FormView+UserCreationForm to write into project DB and stash alias.
-    3) Patch LoginView to authenticate against project DB, stash alias, fix recursion,
-       and redirect under /projects/<id>/.
+    Patches registration and login views to scope auth to the proper DB.
     """
     def __init__(self, get_response):
         self.get_response = get_response
@@ -42,126 +36,193 @@ class PatchRegisterAndLoginMiddleware:
         return self.get_response(request)
 
     def process_view(self, request, view_func, view_args, view_kwargs):
-        # 1) Determine the project_<id> alias
-        alias = getattr(request, "project_db_alias", "default")
-        request.project_db_alias = alias
+        alias = getattr(request, 'project_db_alias', 'default')
+        view_cls = getattr(view_func, 'view_class', None)
 
-        view_cls = getattr(view_func, "view_class", None)
-
-        # ── Monkey-patch the stored RegisterView itself ──
-        if inspect.isclass(view_cls) and view_cls.__name__ == "RegisterView":
-            orig_form_valid = view_cls.form_valid
-
-            def form_valid(self, form):
-                # *create* user via the stored code’s form.save()
-                user = form.save()
-                if user:
-                    # tell Django which backend we’re using:
-                    user.backend = 'django.contrib.auth.backends.ModelBackend'
-                    login(self.request, user)
-                    # record session keys for our session-auth middleware
-                    request.session[SESSION_KEY] = str(user.pk)
-                    request.session[BACKEND_SESSION_KEY] = 'django.contrib.auth.backends.ModelBackend'
-                    request.session['project_db_alias'] = alias
-                return orig_form_valid(self, form)
-
-            view_cls.form_valid = form_valid
-
-        # ── Now patch *any* on-the-fly RegisterView clones ──
-        if inspect.isclass(view_cls) and issubclass(view_cls, FormView):
-            form_cls = getattr(view_cls, "form_class", None)
-            if form_cls and issubclass(form_cls, UserCreationForm):
-                orig_valid = getattr(view_cls, "form_valid")
-
-                class DynamicRegisterForm(form_cls):
+        # Avoid double-patching
+        if not hasattr(view_cls, '_project_patched') and view_cls:
+            # Patch RegisterView
+            # Patch RegisterView: wrap both its form_class *and* form_valid so that
+            # (1) username-uniqueness checks against project_<id> DB
+            # (2) .save() writes into that DB
+            # (3) session backend is set to ProjectDBBackend
+            if view_cls.__name__ == 'RegisterView':
+                # Wrap the view’s form to look at self.request.project_db_alias each time
+                orig_form = getattr(view_cls, 'form_class', None)
+                class ScopedRegisterForm(orig_form):
                     def __init__(self, *args, **kwargs):
                         super().__init__(*args, **kwargs)
-                        self.request = request
-
+                        # attach the request so we can read alias dynamically
+                        self.request = kwargs.get('request') or request
+    
                     def clean_username(self):
-                        username = self.cleaned_data["username"]
-                        mgr = User._default_manager.db_manager(alias)
-                        if mgr.filter(username=username).exists():
+                        alias = (
+                            self.request.project_db_alias
+                            or self.request.session.get('project_db_alias', 'default')
+                        )
+                        uname = self.cleaned_data.get('username')
+                        from django.contrib.auth import get_user_model
+                        User = get_user_model()
+                        if User._default_manager.db_manager(alias).filter(username=uname).exists():
                             raise forms.ValidationError(
-                                self.error_messages["duplicate_username"],
-                                code="duplicate_username"
+                                self.error_messages.get('duplicate_username',
+                                                         'A user with that username already exists.'),
+                                code='duplicate_username'
                             )
-                        return username
-
+                        return uname
+    
                     def save(self, commit=True):
+                        alias = (
+                            self.request.project_db_alias
+                            or self.request.session.get('project_db_alias', 'default')
+                        )
                         user = super().save(commit=False)
-                        user.save(using=alias)
+                        if commit:
+                            user.save(using=alias)
                         return user
-
+    
                     def validate_unique(self):
-                        # skip the global DB’s uniqueness checks
+                        # don't run default-DB unique checks
                         pass
-
-                view_cls.form_class = DynamicRegisterForm
-
+    
+                view_cls.form_class = ScopedRegisterForm
+    
+                # And patch form_valid to log in from the same dynamic alias
+                orig_valid = view_cls.form_valid
                 def form_valid(self, form):
-                    response = orig_valid(self, form)
-                    # re-fetch & log in from the correct DB
-                    usr = User._default_manager.db_manager(alias).get(pk=self.request.user.pk)
-                    usr.backend = 'django.contrib.auth.backends.ModelBackend'
-                    login(self.request, usr)
-                    request.session['project_db_alias'] = alias
-                    return response
+                    alias = (
+                        self.request.project_db_alias
+                        or self.request.session.get('project_db_alias', 'default')
+                    )
+                    user = form.save(commit=True)  # uses our save(using=alias)
+    
+                    # pick correct backend
+                    backend = (
+                        'core.backends.ProjectDBBackend'
+                        if alias != 'default'
+                        else 'django.contrib.auth.backends.ModelBackend'
+                    )
+                    user.backend = backend
+    
+                    login(self.request, user)
+                    request.session[SESSION_KEY]         = user.pk
+                    request.session[BACKEND_SESSION_KEY] = backend
+                    if alias != 'default':
+                        request.session['project_db_alias'] = alias
+    
+                    return orig_valid(self, form)
+    
+                view_cls.form_valid = form_valid
+                view_cls._project_patched = True
+                return None
 
+            # Patch dynamic UserCreationForm on any FormView
+            if issubclass(view_cls, FormView):
+                form_cls = getattr(view_cls, 'form_class', None)
+                if form_cls and issubclass(form_cls, UserCreationForm):
+                    orig = view_cls.form_valid
+                    class DynamicRegisterForm(form_cls):
+                        def __init__(self, *args, **kwargs):
+                            super().__init__(*args, **kwargs)
+                            self.request = request
+                        def clean_username(self):
+                            uname = self.cleaned_data.get('username')
+                            from django.contrib.auth.models import User as AuthUser
+                            if AuthUser._default_manager.db_manager(alias).filter(username=uname).exists():
+                                raise forms.ValidationError(self.error_messages.get('duplicate_username', 'Username taken'), code='duplicate_username')
+                            return uname
+                        def save(self, commit=True):
+                            u = super().save(commit=False)
+                            u.save(using=alias)
+                            return u
+                        def validate_unique(self):
+                            pass
+                    view_cls.form_class = DynamicRegisterForm
+                    def form_valid(self, form):
+                        resp = orig(self, form)
+                        from django.contrib.auth.models import User as AuthUser
+                        u = AuthUser._default_manager.db_manager(alias).get(pk=self.request.user.pk)
+                        u.backend = 'django.contrib.auth.backends.ModelBackend'
+                        login(self.request, u)
+                        if alias != 'default':
+                            request.session['project_db_alias'] = alias
+                        return resp
+                    view_cls.form_valid = form_valid
+                    view_cls._project_patched = True
+                    return None
+
+            # Patch LoginView
+            if issubclass(view_cls, LoginView):
+                # Custom auth form to restrict default-DB users
+                class ProjectAuthForm(AuthenticationForm):
+                    def confirm_login_allowed(self, user):
+                        current = getattr(self.request, 'project_db_alias', 'default')
+                        user_db = getattr(user._state, 'db', 'default')
+                        if current != 'default' and user_db == 'default':
+                            raise forms.ValidationError('Invalid username or password', code='invalid_login')
+                        super().confirm_login_allowed(user)
+                view_cls.authentication_form = ProjectAuthForm
+
+                # Patch form_valid to record alias
+                orig_val = view_cls.form_valid
+                def form_valid(self, form):
+                    # before Django logs in, force the right backend
+                    user = form.get_user()
+                    backend = (
+                        'core.backends.ProjectDBBackend'
+                        if alias != 'default'
+                        else 'django.contrib.auth.backends.ModelBackend'
+                    )
+                    user.backend = backend
+                    # let Django do its normal login() now
+                    resp = orig_val(self, form)
+                    # now stash project alias
+                    if alias != 'default':
+                        self.request.session['project_db_alias'] = alias
+                    return resp
                 view_cls.form_valid = form_valid
 
-        # ── Patch LoginView ──
-        if inspect.isclass(view_cls) and issubclass(view_cls, LoginView):
-            # fix form_invalid recursion
-            orig_invalid = view_cls.form_invalid
-            def form_invalid(self, form):
-                messages.error(self.request, "Invalid username or password")
-                return orig_invalid(self, form)
-            view_cls.form_invalid = form_invalid
+                # Patch redirect under project path
+                orig_url = view_cls.get_success_url
+                def get_success_url(self):
+                    nxt = self.request.POST.get('next') or self.request.GET.get('next')
+                    if nxt:
+                        return nxt
+                    m = re.match(r'^/projects/(\d+)', self.request.path_info)
+                    if m:
+                        return f"/projects/{m.group(1)}/"
+                    return orig_url(self)
+                view_cls.get_success_url = get_success_url
 
-            # stash alias on successful login
-            orig_valid = view_cls.form_valid
-            def form_valid(self, form):
-                resp = orig_valid(self, form)
-                request.session['project_db_alias'] = alias
-                return resp
-            view_cls.form_valid = form_valid
-
-            # redirect back under /projects/<id>/
-            orig_get_success = view_cls.get_success_url
-            def get_success_url(self):
-                nxt = self.request.POST.get('next') or self.request.GET.get('next')
-                if nxt:
-                    return nxt
-                m2 = re.match(r"^/projects/(?P<pid>\d+)", self.request.path_info)
-                if m2:
-                    return f"/projects/{m2.group('pid')}/"
-                return orig_get_success(self)
-            view_cls.get_success_url = get_success_url
+                view_cls._project_patched = True
+                return None
 
         return None
 
 
 class ProjectSessionAuthMiddleware:
     """
-    After AuthMiddleware runs, re-fetch request.user from project_<id> DB
-    if session contains our alias and user PK.
+    Ensures project pages only accept project-DB logins;
+    logs out any default-DB user automatically.
     """
     def __init__(self, get_response):
         self.get_response = get_response
         self.User = get_user_model()
 
     def __call__(self, request):
-        alias       = request.session.get('project_db_alias')
-        user_id     = request.session.get(SESSION_KEY)
-        backend_str = request.session.get(BACKEND_SESSION_KEY)
+        alias = getattr(request, 'project_db_alias', 'default')
+        user = request.user
 
-        if alias and user_id and backend_str:
-            try:
-                u = self.User._default_manager.db_manager(alias).get(pk=user_id)
-                u._state.db = alias
-                request.user = u
-            except self.User.DoesNotExist:
-                pass
-
+        # If we’re under /projects/<id>/…, ignore whatever auth middleware loaded
+        # and *always* re-load the user from that project's DB (or anon if not found).
+        if alias.startswith('project_'):
+            uid = request.session.get(SESSION_KEY)
+            if uid:
+                try:
+                    u = self.User._default_manager.db_manager(alias).get(pk=uid)
+                    u._state.db = alias
+                    request.user = u
+                except self.User.DoesNotExist:
+                    logout(request)
+                    request.user = AnonymousUser()
         return self.get_response(request)

@@ -70,6 +70,7 @@ AUTHENTICATION_BACKENDS = [
 
 MIDDLEWARE = [
     # 1) detect project-alias first
+
     'core.middleware.ProjectDBMiddleware',
 
     # 2) patch register/login to write into the project DB and record alias
@@ -77,9 +78,12 @@ MIDDLEWARE = [
 
     # 3) Django’s built-in session & auth middlewares
     'django.contrib.sessions.middleware.SessionMiddleware',
+    
     'django.contrib.auth.middleware.AuthenticationMiddleware',
+        'corsheaders.middleware.CorsMiddleware',
 
     # 4) now re-hydrate request.user from project DB
+    
     'core.middleware.ProjectSessionAuthMiddleware',
 
     # your other middleware…
@@ -125,6 +129,7 @@ DATABASES = {
         'NAME': BASE_DIR / 'db.sqlite3',
     }
 }
+
 
 # route project_<id>_app_label to project_<id> database
 DATABASE_ROUTERS = ['core.db_router.ProjectRouter']

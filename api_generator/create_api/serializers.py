@@ -1,7 +1,8 @@
 from rest_framework import serializers
 from django.contrib.auth.models import User
-from .models import UserModel, Project, ModelFile, App, ViewFile, FormFile, ProjectFile, URLFile, SettingsFile, TemplateFile,AppFile,StaticFile,MediaFile
-
+from .models import (UserModel, Project, ModelFile, App, ViewFile, FormFile, ProjectFile, URLFile, 
+SettingsFile, TemplateFile,AppFile,StaticFile,MediaFile, AIConversation, AIMessage, AIChangeRequest
+)
 class UserSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
@@ -163,16 +164,46 @@ class ProjectFileSerializer(serializers.ModelSerializer):
 class ProjectSerializer(serializers.ModelSerializer):
     apps = AppSerializer(many=True, read_only=True)
     settings_files = SettingsFileSerializer(many=True, read_only=True)
-    url_files = URLFileSerializer(many=True, read_only=True)
+    url_files     = URLFileSerializer(many=True, read_only=True)
     project_files = ProjectFileSerializer(many=True, read_only=True)
-
+    # ← Add these three:
+    template_files = TemplateFileSerializer(many=True, read_only=True)
+    static_files   = StaticFileSerializer(many=True, read_only=True)
+    media_files    = MediaFileSerializer(many=True, read_only=True)
     class Meta:
         model = Project
-        fields = ['id', 'user', 'name', 'description', 'visibility', 'created_at', 'apps', 'settings_files', 'url_files', 'project_files']
-        read_only_fields = ['user', 'created_at']
+        fields = [
+            'id','user','name','description','visibility','created_at',
+            'apps','settings_files','template_files','static_files',
+            'media_files','url_files','project_files'
+        ]
 
     def create(self, validated_data):
         # Assign the user from the request to the project
         user = self.context['request'].user
         validated_data['user'] = user  # Ensure the user is set
         return super().create(validated_data)
+
+
+
+class AIMessageSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AIMessage
+        fields = ['id','sender','text','timestamp']
+
+class AIChangeRequestSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AIChangeRequest
+        fields = ['id','file_type','app_name','file_path','diff','status','created_at']
+
+class AIConversationSerializer(serializers.ModelSerializer):
+    messages = AIMessageSerializer(many=True, read_only=True)
+    changes  = AIChangeRequestSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = AIConversation
+        fields = [
+            'id','project','app_name','file_path','user','status',
+            'created_at','updated_at','messages','changes'
+        ]
+        read_only_fields = ['user','status','created_at','updated_at']

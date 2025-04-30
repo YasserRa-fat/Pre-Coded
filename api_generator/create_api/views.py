@@ -5,9 +5,14 @@ from django.http import Http404
 from rest_framework import generics, viewsets, status
 from django.contrib.auth.models import User
 from rest_framework.response import Response
+from rest_framework.decorators import action
+from core.services.ai_editor import call_ai, parse_ai_output
+from django.db import transaction
 from .serializers import (UserSerializer, UserModelSerializer, ModelFileSerializer,
  ProjectSerializer,AppSerializer, ViewFileSerializer,FormFileSerializer, ProjectFileSerializer,SettingsFileSerializer,
- URLFileSerializer,AppFileSerializer, MediaFileSerializer, TemplateFileSerializer, StaticFileSerializer
+ URLFileSerializer,AppFileSerializer, MediaFileSerializer, TemplateFileSerializer, StaticFileSerializer,
+     AIConversationSerializer,AIMessageSerializer,AIChangeRequestSerializer,
+
 )
 from rest_framework.exceptions import NotFound
 from django.shortcuts import get_object_or_404
@@ -27,7 +32,7 @@ from django.core.management import call_command
 from io import StringIO
 from django.apps import apps
 from .models import (UserModel, Project, ModelFile, App, ViewFile, FormFile, SettingsFile, StaticFile, 
-URLFile, AppFile, CodeFile,MediaFile,ProjectFile,TemplateFile)
+URLFile, AppFile, CodeFile,MediaFile,ProjectFile,TemplateFile,AIConversation, AIMessage, AIChangeRequest)
 from rest_framework.decorators import api_view, permission_classes
 import random
 from rest_framework.generics import RetrieveAPIView
@@ -1578,5 +1583,133 @@ class RunProjectAPIView(APIView):
 
         # Build an absolute URL so the frontend can open a full link
         full_url = request.build_absolute_uri(path)
-
         return Response({'url': full_url}, status=status.HTTP_200_OK)
+    
+class DebugDBAlias(APIView):
+    def get(self, request, *args, **kwargs):
+        return Response({
+            "project_db_alias": getattr(request, "project_db_alias", None),
+            "session_db_alias": request.session.get("project_db_alias"),
+            "user_state_db": getattr(request.user._state, "db", None),
+            "user_pk": request.user.pk,
+        })
+class AIConversationViewSet(viewsets.ModelViewSet):
+    """
+    list/create are default. We override create to auto-set user.
+    Custom actions:
+      - message/  : POST a user prompt → returns either clarification or diff preview
+      - confirm/  : POST to apply the change requests
+    """
+    queryset = AIConversation.objects.all()
+    serializer_class = AIConversationSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        # only show your own or staff
+        qs = super().get_queryset()
+        return qs.filter(user=self.request.user)
+
+    def perform_create(self, serializer):
+        # require project, optional app_name/file_path in payload
+        serializer.save(user=self.request.user)
+
+    @action(detail=True, methods=['post'])
+    def message(self, request, pk=None):
+        conv = self.get_object()
+        text = request.data.get("message","").strip()
+        if not text:
+            return Response({"detail":"Empty message."}, status=400)
+
+        # 1) record user message
+        AIMessage.objects.create(conversation=conv, sender='user', text=text)
+
+        # 2) call AI
+        ai_text = call_ai(conv, text)
+        kind, body = parse_ai_output(ai_text)
+
+        # 3) record assistant message
+        AIMessage.objects.create(conversation=conv, sender='assistant', text=ai_text)
+
+        if kind == 'clarify':
+            conv.status = 'awaiting_clarification'
+            conv.save(update_fields=['status'])
+            return Response({"clarification": body})
+        else:
+            # kind == 'diff'
+            # create a draft change request
+            change = AIChangeRequest.objects.create(
+                conversation=conv,
+                file_type=request.data.get('file_type','other'),
+                app_name=conv.app_name,
+                file_path=conv.file_path,
+                diff=body,
+            )
+            conv.status = 'review'
+            conv.save(update_fields=['status'])
+            return Response({
+                "diff": body,
+                "change_id": change.id
+            })
+
+    @action(detail=True, methods=['post'])
+    def confirm(self, request, pk=None):
+        conv = self.get_object()
+        if conv.status != 'review':
+            return Response({"detail":"No changes to confirm."}, status=400)
+
+        change_id = request.data.get("change_id")
+        change = get_object_or_404(AIChangeRequest, pk=change_id, conversation=conv)
+
+        # apply the diff to the DB-backed file model
+        from create_api.models import TemplateFile, ModelFile, ViewFile, FormFile, AppFile, SettingsFile, URLFile
+        FILE_MODEL = {
+            'template': TemplateFile,
+            'model':     ModelFile,
+            'view':      ViewFile,
+            'form':      FormFile,
+            'other':     AppFile,
+        }.get(change.file_type, AppFile)
+
+        # find the existing file record
+        if change.file_type in ('template','other'):
+            obj = FILE_MODEL.objects.filter(
+                project=conv.project,
+                app__name=change.app_name if change.app_name else None,
+                path=change.file_path
+            ).first()
+        else:
+            obj = FILE_MODEL.objects.filter(
+                project=conv.project,
+                app__name=change.app_name if change.app_name else None,
+                name=change.file_path.split('/')[-1]
+            ).first()
+
+        if not obj:
+            return Response({"detail":"Original file not found."}, status=404)
+
+        # apply the unified diff: we naively patch the content here
+        import difflib
+        original = obj.content.splitlines(keepends=True)
+        patched = list(difflib.restore(change.diff.splitlines(), 1))
+        obj.content = "".join(patched)
+        obj.save()
+
+        # if it's a model change, run makemigrations & migrate
+        if change.file_type == 'model':
+            from django.core.management import call_command
+            app_label = obj.app._meta.label_lower
+            call_command("makemigrations", app_label, interactive=False)
+            call_command("migrate", app_label, database=request.project_db_alias, interactive=False)
+
+        change.status = 'applied'
+        change.save(update_fields=['status'])
+        conv.status = 'closed'
+        conv.save(update_fields=['status'])
+        return Response({"detail":"Changes applied."})
+
+    @action(detail=True, methods=['post'])
+    def cancel(self, request, pk=None):
+        conv = self.get_object()
+        conv.status = 'cancelled'
+        conv.save(update_fields=['status'])
+        return Response({"detail":"Conversation cancelled."})

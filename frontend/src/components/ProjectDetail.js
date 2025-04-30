@@ -176,8 +176,7 @@ const handleRunProject = async () => {
           {renderFileCards(settingsFiles,    'settings-files')}
           {renderFileCards(projectUrlFiles,  'url-files')}
           {renderFileCards(projectFiles,     'project-files')}
-          {renderFileCards(staticFiles,      'static-files')}
-          {renderFileCards(mediaFiles,       'media-files')}
+
 
           <div className="file-nav-buttons">
             <button onClick={() => navigate(`/projects/${projectId}/template-files`)}>
