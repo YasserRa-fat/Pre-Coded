@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% load static %}
+{% block content %}
+<div class="gtco-container">
+  <div class="row">
+    <div class="col-md-8 col-md-offset-2 text-center gtco-heading">
+      <h2 class="cursive-font">Recent Posts</h2>
+      <p>Dignissimos asperiores vitae velit veniam totam fuga molestias accusamus alias autem provident. Odit ab aliquam dolor eius.</p>
+    </div>
+  </div>
+  <div class="row row-pb-md">
+    {% for post in posts %}
+    <div class="col-md-6 animate-box">
+      <div class="blog-entry">
+        <a href="{{ post.get_absolute_url }}" class="blog-img"><img src="{{ post.image.url }}" alt="Free HTML5 Bootstrap Template by templatemo" class="img-responsive"></a>
+        <div class="desc">
+          <span><small>{{ post.created_at }}</small> {{ post.user }}</span>
+          <h3><a href="{{ post.get_absolute_url }}">{{ post.title }}</a></h3>
+          <p>{{ post.description }}</p>
+        </div>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  <div class="row">
+    <div class="col-md-12 text-center">
+      <ul class="pagination">
+        {% if page_obj.has_previous %}
+          <li><a href="?page={{ page_obj.previous_page_number }}">&lt;</a></li>
+        {% else %}
+          <li class="disabled"><span>&lt;</span></li>
+        {% endif %}
+        {% for i in page_obj.paginator.page_range %}
+          {% if page_obj.number == i %}
+            <li class="active"><span>{{ i }} <span class="sr-only">(current)</span></span></li>
+          {% elif i > page_obj.number|add:'-3' and i < page_obj.number|add:'3' %}
+            <li><a href="?page={{ i }}">{{ i }}</a></li>
+          {% endif %}
+        {% endfor %}
+        {% if page_obj.has_next %}
+          <li><a href="?page={{ page_obj.next_page_number }}">&gt;</a></li>
+        {% else %}
+          <li class="disabled"><span>&gt;</span></li>
+        {% endif %}
+      </ul>
+    </div>
+  </div>
+{% endblock %}

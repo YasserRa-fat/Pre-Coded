@@ -131,11 +131,16 @@ const ViewFileDiagram = () => {
   // 🔧 FIXED: use ?app= instead of ?app_id=
   const fetchModelSummaries = async (appId) => {
     try {
-      const res = await axios.get(`/api/model-file/?app_id=${appId}`, {
+      const res = await axios.get(`/api/model-files/?app_id=${appId}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       console.log('Full API Response:', res.data);  // Log the entire response
-      return res.data?.model_summaries || {};  // Fallback to empty object if model_summaries is missing
+          const files = res.data;
+          if (Array.isArray(files) && files.length > 0) {
+            // pick the latest or first one
+            return files[0].model_summaries || {};
+          }
+          return {};  // Fallback to empty object if model_summaries is missing
     } catch (err) {
       console.error('Error fetching model summaries:', err);
       return {};  // Return empty object on error
@@ -145,15 +150,15 @@ const ViewFileDiagram = () => {
   // 🔧 FIXED: use ?app= instead of ?app_id=
   const fetchFormSummaries = async (appId) => {
     try {
-      const res = await axios.get(`/api/formfile/?app=${appId}`, {
+      const res = await axios.get(`/api/formfile/?app_id=${appId}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
-      return res.data.reduce((acc, file) => {
-        Object.entries(file.form_summaries || {}).forEach(([k, v]) => {
-          acc[k.trim()] = v;
-        });
-        return acc;
-      }, {});
+            const files = res.data;
+            if (Array.isArray(files) && files.length > 0) {
+              // take the first saved FormFile’s summaries
+              return files[0].form_summaries || {};
+            }
+            return {};
     } catch (err) {
       console.error('Error fetching form summaries:', err);
       return {};

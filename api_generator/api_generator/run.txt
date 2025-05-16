@@ -1,0 +1,2 @@
+uvicorn api_generator.asgi_ws:application --port 8001 --reload
+set DJANGO_ALLOW_ASYNC_UNSAFE=1 && uvicorn api_generator.asgi:application --reload

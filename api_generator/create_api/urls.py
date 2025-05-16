@@ -46,9 +46,16 @@ from .views import (
     AppTemplateFileListCreateAPIView,
     ProjectTemplateFileDetailAPIView,
     ProjectTemplateFileListCreateAPIView,
+    ModelFileListCreateAPIView,
     RunProjectAPIView,
     AIConversationViewSet, 
-     DebugDBAlias # <— make sure this is imported
+     DebugDBAlias, # <— make sure this is imported
+     CookieTokenObtainPairView,
+     preview_view,
+     PreviewOneView,
+     ApplyChangesAPIView,
+     FullPreviewDiffAPIView,
+     PreviewRunAPIView
 )
 
 # router for your AI endpoints
@@ -61,7 +68,7 @@ appfile_detail = AppFileViewSet.as_view({'get': 'retrieve','put':    'update','d
 urlpatterns = [
     # --- auth & user endpoints ---
     path('register/',               RegisterView.as_view(),                    name='register'),
-    path('token/',                  TokenObtainPairView.as_view(),            name='token_obtain_pair'),
+    path('token/',                  CookieTokenObtainPairView.as_view(),            name='token_obtain_pair'),
     path('token/refresh/',          TokenRefreshView.as_view(),               name='token_refresh'),
     path('current_user/',           CurrentUserAPIView.as_view(),             name='current_user'),
 
@@ -99,14 +106,14 @@ urlpatterns = [
     path('save-formfile/',          SaveFormFileAPIView.as_view(),            name='save-formfile'),
     path('save-formfile-content/',  SaveFormFileContentAPIView.as_view(),     name='save-formfile-content'),
     path('parse-formfile/',         parse_formfile,                           name='parse-formfile'),
-
+    path('parse-viewfile/',parse_viewfile),
     path('settings-files/<int:pk>/',SettingsFileDetailAPIView.as_view(),       name='settingsfile-detail'),
     path('url-files/<int:pk>/',     URLFileDetailAPIView.as_view(),            name='urlfile-detail'),
     path('project-files/<int:pk>/', ProjectFileDetailAPIView.as_view(),        name='projectfile-detail'),
 
     path('app-files/',              appfile_list,                             name='appfile-list'),
     path('app-files/<int:pk>/',     appfile_detail,                           name='appfile-detail'),
-
+path('form‑files/',     FormFileListAPIView.as_view(),   name='formfile-list'),
     # --- URLFiles (project & app) ---
     path('projects/<int:project_pk>/url-files/',       ProjectURLFileListCreateAPIView.as_view(), name='project-urlfile-list'),
     path('projects/<int:project_pk>/url-files/<int:pk>/', ProjectURLFileDetailAPIView.as_view(),     name='project-urlfile-detail'),
@@ -127,11 +134,27 @@ urlpatterns = [
     path('apps/<int:app_pk>/media-files/<int:pk>/',    ProjectMediaFileDetailAPIView.as_view(),       name='app-mediafile-detail'),
     path('apps/<int:app_pk>/template-files/',          AppTemplateFileListCreateAPIView.as_view(),    name='app-templatefile-list'),
     path('apps/<int:app_pk>/template-files/<int:pk>/', AppTemplateFileDetailAPIView.as_view(),       name='app-templatefile-detail'),
-
+ path('model-files/',            ModelFileListCreateAPIView.as_view(), name='modelfile-list-create'),
     # --- run project endpoint ---
     path('projects/<int:project_pk>/run/',             RunProjectAPIView.as_view(),                  name='run-project'),
     path('debug-db/', DebugDBAlias.as_view(), name='debug-db'),
-   
+path("projects/<int:project_id>/preview/", preview_view, name="preview_project"),
+path(
+        "projects/<int:project_id>/preview/one/<int:change_id>/",
+        PreviewOneView.as_view(),
+        name="preview-one",
+    ),
+path(
+        "projects/<int:project_id>/preview/diff/<int:change_id>/",
+        FullPreviewDiffAPIView.as_view(),
+        name="preview-diff"
+    ),
+    path(
+        "projects/<int:project_id>/apply/<int:change_id>/",
+        ApplyChangesAPIView.as_view(),
+        name="apply-changes"
+    ),
+    path('projects/<int:project_id>/preview/run/', PreviewRunAPIView.as_view(), name='preview-run'),
 ]
 
 # finally wire up our AI router

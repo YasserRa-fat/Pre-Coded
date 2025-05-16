@@ -1,107 +1,64 @@
-// src/floating-bot/FloatingChat.jsx
-
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import Draggable from 'react-draggable';
 import { useLocation } from 'react-router-dom';
 import AIChat from '../components/AIChat';
+import '../components/css/FloatingChat.css';
 
-export default function FloatingChat() {
+export default function FloatingChat({ onDiff }) {
   const loc = useLocation();
   const [open, setOpen] = useState(false);
-  // 1️⃣ create a ref for Draggable
   const nodeRef = useRef(null);
 
-  // Manually extract projectId and appId from the URL:
+  // Extract project/app/file from URL
   const projectMatch = loc.pathname.match(/^\/projects\/([^/]+)/);
-  const projectId = projectMatch ? projectMatch[1] : null;
-
-  const appMatch = loc.pathname.match(
-    /^\/projects\/[^/]+\/apps\/([^/]+)/
-  );
-  const appId = appMatch ? appMatch[1] : null;
-
-  // Extract the filePath (last segment)
+  const projectId = projectMatch?.[1];
+  const appMatch = loc.pathname.match(/^\/projects\/[^/]+\/apps\/([^/]+)/);
+  const appId = appMatch?.[1] || '';
   const filePathMatch = loc.pathname.match(/\/([^/]+)\/?$/);
   const filePath = filePathMatch?.[1] || '';
 
-  // Only show on any /projects/:projectId/... route
-  const shouldShow = Boolean(projectId);
+  const INITIAL_WIDTH = 360;
+  const INITIAL_HEIGHT = 480;
+  const [position, setPosition] = useState({ left: 0, top: 0 });
 
-  if (!shouldShow) return null;
+  // Hook must always be called — even if we don't render
+  useEffect(() => {
+    const left = window.innerWidth - 20 - INITIAL_WIDTH;
+    const top = window.innerHeight - 90 - INITIAL_HEIGHT;
+    setPosition({ left, top });
+  }, []);
+
+  // Now safe to do conditional rendering
+  if (!projectId) return null;
 
   return (
     <>
-      {/* floating icon */}
-      <div
-        onClick={() => setOpen(true)}
-        style={{
-          position: 'fixed',
-          bottom: 20,
-          right: 20,
-          width: 56,
-          height: 56,
-          borderRadius: '50%',
-          background: '#007bff',
-          color: '#fff',
-          fontSize: 28,
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          cursor: 'pointer',
-          zIndex: 10000,
-        }}
-      >
-        🤖
-      </div>
+      <div className="floating-icon" onClick={() => setOpen(true)}>🤖</div>
 
       {open && (
-       <Draggable nodeRef={nodeRef} handle=".chat-header">
+        <Draggable nodeRef={nodeRef} handle=".chat-header"  bounds="parent"  >
           <div
+            ref={nodeRef}
+            className="resizable-chat-wrapper"
             style={{
-              position: 'fixed',
-              bottom: 90,
-              right: 20,
-              width: 320,
-              height: 400,
-              background: '#fff',
-              border: '1px solid #ccc',
-              borderRadius: 8,
-              boxShadow: '0 2px 10px rgba(0,0,0,0.2)',
-              zIndex: 10000,
-              display: 'flex',
-              flexDirection: 'column',
-              overflow: 'hidden',
+              left: position.left,
+              top: position.top,
+              width: INITIAL_WIDTH,
+              height: INITIAL_HEIGHT,
             }}
           >
-            {/* HEADER */}
-            <div
-              className="chat-header"
-              style={{
-                cursor: 'move',
-                padding: '4px 8px',
-                borderBottom: '1px solid #eee',
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-              }}
-            >
-              <strong>AI Chat</strong>
-              <button
-                onClick={() => setOpen(false)}
-                style={{ border: 'none', background: 'none', cursor: 'pointer' }}
-              >
+            <div className="chat-header">
+              <span>AI Chat</span>
+              <button className="close-btn" onClick={() => setOpen(false)}>
                 ✖
               </button>
             </div>
-
-            {/* CHAT BODY */}
-            <div style={{ flex: 1, overflowY: 'auto', padding: '8px' }}>
-              <AIChat
-                projectId={projectId}
-                appName={appId || ''}
-                filePath={filePath}
-              />
-            </div>
+            <AIChat
+              projectId={projectId}
+              appName={appId}
+              filePath={filePath}
+              onDiff={onDiff}  
+            />
           </div>
         </Draggable>
       )}

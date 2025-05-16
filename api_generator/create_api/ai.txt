@@ -1,0 +1,4 @@
+from create_api.test_consumer import AIChatConsumerTest
+import asyncio
+test = AIChatConsumerTest('test_diff_flow')
+asyncio.run(test.test_diff_flow())

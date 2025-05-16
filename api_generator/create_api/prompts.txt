@@ -1,0 +1,1 @@
+add an analytics graph on the user's feed page before the posts showing interactions in past 10 days based on comments made on their posts

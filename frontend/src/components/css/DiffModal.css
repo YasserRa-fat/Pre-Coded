@@ -1,0 +1,154 @@
+/* src/components/css/DiffModal.css */
+
+/* 1) Full-screen overlay, flex-centered */
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: rgba(0, 0, 0, 0.5);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  z-index: 1000;
+}
+
+/* 2) The diff-modal itself */
+.diff-modal {
+  background: white;
+  border-radius: 8px;
+  padding: 20px;
+  width: 95%;
+  max-width: 1600px;
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Remove any inherited .modal-content constraints */
+.diff-modal.modal-content,
+.modal-content.diff-modal {
+  margin: 0 !important;
+  max-width: none !important;
+  max-height: none !important;
+}
+
+/* 3) Header */
+.modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+}
+
+.modal-header h3 {
+  margin: 0;
+  font-size: 1.2rem;
+}
+
+.close-btn {
+  background: none;
+  border: none;
+  font-size: 24px;
+  cursor: pointer;
+  padding: 0;
+  color: #666;
+}
+
+.close-btn:hover {
+  color: #333;
+}
+
+/* 4) Body: two equal panes */
+.modal-body {
+  flex: 1;
+  overflow: auto;
+}
+
+.preview-comparison {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+  height: 100%;
+}
+
+.preview-pane {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.preview-pane h4 {
+  margin: 0 0 10px 0;
+  padding: 10px;
+  background: #f5f5f5;
+  border-radius: 4px;
+}
+
+.preview-iframe {
+  flex: 1;
+  width: 100%;
+  min-height: 600px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+}
+
+.preview-loading {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: 600px;
+  background: #f9f9f9;
+  border: 1px solid #eee;
+  border-radius: 4px;
+  color: #666;
+}
+
+.preview-error {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: 600px;
+  background: #fff5f5;
+  border: 1px solid #ffebeb;
+  border-radius: 4px;
+  color: #dc3545;
+}
+
+/* 5) Footer */
+.modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 20px;
+  padding-top: 20px;
+  border-top: 1px solid #eee;
+}
+
+.primary-btn,
+.secondary-btn {
+  padding: 8px 16px;
+  border-radius: 4px;
+  border: none;
+  cursor: pointer;
+  font-weight: 500;
+}
+
+.primary-btn {
+  background: #007bff;
+  color: white;
+}
+
+.primary-btn:hover {
+  background: #0056b3;
+}
+
+.secondary-btn {
+  background: #6c757d;
+  color: white;
+}
+
+.secondary-btn:hover {
+  background: #5a6268;
+}

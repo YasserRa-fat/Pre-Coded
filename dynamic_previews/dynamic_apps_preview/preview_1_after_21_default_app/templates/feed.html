@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% load static %}
+{% block content %}
+```html
+{% extends "base.html" %}
+{% load static %}
+  <div class="analytics-graph">
+    <canvas id="analyticsChart"></canvas>
+  </div>
+  {% for post in posts %}
+    <!-- Post content -->
+  {% endfor %}
+  <!-- Include Chart.js library -->
+  <script src="{% static 'chart.js/chart.min.js' %}"></script>
+```
+This is the HTML template for a feed page that displays posts from users that the current user is following.
+Here is the code for templates/feed.html:
+```html
+{% extends 'base.html' %}
+  <h1>Feed</h1>
+  {% if following_users %}
+    {% for user in following_users %}
+      {% for post in user.posts.all %}
+        <div class="post">
+          <h2>{{ post.title }}</h2>
+          <p>{{ post.content }}</p>
+          <p>{{ post.created_at }}</p>
+        </div>
+      {% endfor %}
+    {% endfor %}
+  {% else %}
+    <p>You are not following any users.</p>
+  {% endif %}
+```
+This code extends the base template and displays a heading for the feed page. If the user is following other users, it will display all the posts from those users. If the user is not following any users, it will display a message indicating that.
+Note: This code assumes that there is a relationship between the User and Post models, and that the current user has a list of users they are following stored in the `following_users` variable. You may need to modify the code to fit the specifics of your Django project.
+{% endblock %}

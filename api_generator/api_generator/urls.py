@@ -17,9 +17,10 @@ from create_api.views import (
     upload_files,
     GenerateModelCodeAPIView,
     UserModelViewSet,
+    PreviewRunAPIView
 )
 from django.urls import re_path  # or path with converters
-from core.views import serve_db_static, serve_db_media
+from core.views import serve_db_static, serve_db_media,serve_drf_static
 def sanitize_content(content):
     return content.replace('\xa0', ' ')  # Replace non-breaking spaces
 
@@ -41,6 +42,11 @@ urlpatterns += [
     path("available-models/", AvailableModelsAPIView.as_view(), name="available-models"),
     path("upload-files/", upload_files, name="upload_files"),
      # 1) DB‐backed static first
+    re_path(r'^static/(?P<path>.*)$', serve_db_static, name='db_static'),
+       # 1) DRF browsable‐API assets from disk
+    re_path(r'^static/rest_framework/(?P<path>.*)$', serve_drf_static),
+
+    # 2) DB‐backed static after that
     re_path(r'^static/(?P<path>.*)$', serve_db_static, name='db_static'),
     # 2) DB‐backed media next
     re_path(r'^media/(?P<path>.*)$', serve_db_media, name='db_media'),
@@ -117,7 +123,7 @@ for urlfile in URLFile.objects.exclude(app__isnull=True):
         include(modstr),
     )
         )
-        print(f"✅ Added app-level URL patterns for project {pid}, app {appname}")
+        # print(f"✅ Added app-level URL patterns for project {pid}, app {appname}")
     except ImportError:
         print(f"❌ Failed to import app-level module: {modstr}")
         continue
@@ -134,8 +140,11 @@ class RunProjectAPIView(APIView):
         return Response({'url': full_url}, status=status.HTTP_200_OK)
 
 urlpatterns.append(
-    path('projects/<int:project_pk>/run/', RunProjectAPIView.as_view(), name='run-project'),
-    
+    path('projects/<int:project_id>/run/', RunProjectAPIView.as_view(), name='run-project'),
+)
+urlpatterns.append(
+    path('projects/<int:project_id>/preview/run/',
+         PreviewRunAPIView.as_view(), name='preview-run'),
 )
 urlpatterns.append(
     path(
@@ -145,11 +154,11 @@ urlpatterns.append(
 )
 
 # Debug output
-print("✅ Final URL patterns:")
-for pattern in urlpatterns:
-    print(pattern)
+# print("✅ Final URL patterns:")
+# for pattern in urlpatterns:
+#     print(pattern)
 
 # Optional: show key URLFile objects
-users_urlfile = URLFile.objects.filter(project_id=1, app__name='users', path='users/urls.py')
-posts_urlfile = URLFile.objects.filter(project_id=1, app__name='posts', path='posts/urls.py')
-print(users_urlfile, posts_urlfile)
+# users_urlfile = URLFile.objects.filter(project_id=1, app__name='users', path='users/urls.py')
+# posts_urlfile = URLFile.objects.filter(project_id=1, app__name='posts', path='posts/urls.py')
+# print(users_urlfile, posts_urlfile)

@@ -124,6 +124,8 @@ class CodeFile(models.Model):
 # -------------------------------------------------------------------
 # Specific file types
 # -------------------------------------------------------------------
+# create_api/models.py
+
 class ModelFile(CodeFile):
     app = models.ForeignKey(App, on_delete=models.CASCADE, related_name="model_files")
     project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name="project_model_files")
@@ -131,8 +133,15 @@ class ModelFile(CodeFile):
     summary = models.TextField(blank=True)
     model_summaries = models.JSONField(default=dict, blank=True, null=True)
 
+    class Meta:
+        unique_together = ('app', 'name')      # ← enforce at the DB level
+        indexes = [
+            models.Index(fields=['app', 'name']),
+        ]
+
     def __str__(self):
         return f"ModelFile: {self.app.name}/{self.name}"
+
 
 class ViewFile(CodeFile):
     app = models.ForeignKey(App, on_delete=models.CASCADE, related_name="view_files")
@@ -224,6 +233,20 @@ class AIConversation(models.Model):
     project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='ai_conversations')
     app_name = models.CharField(max_length=100, blank=True, null=True)
     file_path = models.CharField(max_length=512, blank=True, null=True)
+    file_type = models.CharField(
+    max_length=32,
+    choices=[
+        ('template', 'Template'),
+        ('model',    'Model'),
+        ('view',     'View'),
+        ('form',     'Form'),
+        ('app',      'New App'),
+        ('other',    'Other'),
+    ],
+    blank=True,
+    null=True,
+    help_text='Type of file being edited'
+    )
     user = models.ForeignKey(User, on_delete=models.CASCADE)
     status = models.CharField(max_length=32, choices=STATUS_CHOICES, default='open')
     created_at = models.DateTimeField(auto_now_add=True)
@@ -246,15 +269,24 @@ class AIChangeRequest(models.Model):
         ('app', 'New App'),
         ('other', 'Other')
     ])
-    app_name = models.CharField(max_length=100, blank=True, null=True)
+    project = models.ForeignKey(Project, on_delete=models.CASCADE)
     file_path = models.CharField(max_length=512, blank=True, null=True)
     diff = models.TextField()
+    files        = models.JSONField(default=list, help_text="List of file paths this diff applies to")
     status = models.CharField(max_length=16, choices=[
         ('draft', 'Draft'),
         ('applied', 'Applied'),
         ('rejected', 'Rejected')
     ], default='draft')
     created_at = models.DateTimeField(auto_now_add=True)
-
+    app_name = models.CharField(
+        max_length=100,
+        null=False,
+        blank=False,
+        help_text="The Django app label (e.g. 'project_1_posts') this change targets"
+    )
     def __str__(self):
         return f"ChangeRequest {self.id} ({self.status})"
+    def save(self, *args, **kwargs):
+        print(f"Saving ChangeRequest {self.id}")
+        super().save(*args, **kwargs)

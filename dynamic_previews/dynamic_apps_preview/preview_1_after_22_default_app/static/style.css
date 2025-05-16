@@ -1,0 +1,52 @@
+Here's a simple example of a CSS file that you might use in a Django project. This file includes some basic styling for a webpage, such as setting the background color, font family, and font size.
+
+```
+/* Set the background color of the page */
+body {
+  background-color: #f0f0f0;
+}
+
+/* Set the font family and font size of the body text */
+body {
+  font-family: Arial, sans-serif;
+  font-size: 16px;
+}
+
+/* Style the navigation bar */
+nav {
+  background-color: #333;
+  color: #fff;
+  display: flex;
+  justify-content: space-between;
+  padding: 10px 20px;
+}
+
+/* Style the navigation links */
+nav a {
+  color: #fff;
+  text-decoration: none;
+  margin-right: 10px;
+}
+
+/* Style the main content area */
+main {
+  padding: 20px;
+}
+
+/* Style the footer */
+footer {
+  background-color: #333;
+  color: #fff;
+  text-align: center;
+  padding: 10px;
+  margin-top: 20px;
+}
+```
+
+This is just a basic example, and you can customize the CSS to fit the needs of your Django project. To use this CSS file in your Django project, you will need to include it in the `<head>` of your HTML templates, like this:
+
+```
+<link rel="stylesheet" type="text/css" href="{% static 'css/style.css' %}">
+```
+
+This will allow the browser to load the CSS file and apply the styles to your webpage.

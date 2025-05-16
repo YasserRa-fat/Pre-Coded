@@ -1,0 +1,85 @@
+```css
+#analyticsChartContainer {
+  width: 100%;
+  height: 400px;
+}
+```
+
+File: static/js/script.js
+Required Change: Add JS code for Chart.js integration with 'comments_data' and canvas id 'analyticsChart'.
+
+```javascript
+// Add global Chart.js namespace
+Chart = Chart || {};
+
+// Define analyticsChart configuration
+const analyticsChartConfig = {
+  type: 'line',
+  data: {
+    labels: [],
+    datasets: [{
+      label: 'Comments count',
+      data: [],
+      borderColor: 'rgba(75, 192, 192, 1)',
+      fill: false,
+    }]
+  },
+  options: {
+    responsive: true,
+    title: {
+      display: true,
+      text: 'Comments over time'
+    },
+    tooltips: {
+      mode: 'index',
+      intersect: false,
+    },
+    hover: {
+      mode: 'nearest',
+      intersect: true
+    },
+    scales: {
+      x: {
+        display: true,
+        scaleLabel: {
+          display: true,
+          labelString: 'Date'
+        }
+      },
+      y: {
+        display: true,
+        scaleLabel: {
+          display: true,
+          labelString: 'Count'
+        }
+      }
+    }
+  }
+};
+
+// Function to update analyticsChart with new data
+function updateAnalyticsChart(comments_data) {
+  // Set chart data
+  analyticsChartConfig.data.labels = comments_data.dates;
+  analyticsChartConfig.data.datasets[0].data = comments_data.counts;
+
+  // Create or update the chart
+  if (Chart.analyticsChart) {
+    Chart.analyticsChart.update();
+  } else {
+    const ctx = document.getElementById('analyticsChart').getContext('2d');
+    Chart.analyticsChart = new Chart(ctx, analyticsChartConfig);
+  }
+}
+
+// Mock comments_data
+const comments_data = {
+  dates: ['2022-01-01', '2022-01-02', '2022-01-03'],
+  counts: [10, 15, 12]
+};
+
+// Call updateAnalyticsChart with mock data
+updateAnalyticsChart(comments_data);
+```
+
+This code provides the complete static file code (CSS and JS) for the Django project. The CSS styles the analytics graph container, and the JS integrates Chart.js with the provided 'comments_data' and canvas id 'analyticsChart'.

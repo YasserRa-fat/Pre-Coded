@@ -1,0 +1,52 @@
+Updated File: static/css/style.css
+Content:
+```css
+#analytics-graph {
+  width: 100%;
+  height: 400px;
+  margin-bottom: 30px;
+}
+
+#analytics-graph .ct-series-a {
+  stroke: #ff6b6b;
+  stroke-width: 2;
+  stroke-dasharray: 0;
+}
+
+#analytics-graph .ct-series-b {
+  stroke: #34bf49;
+  stroke-width: 2;
+  stroke-dasharray: 0;
+}
+
+#analytics-graph .ct-series-c {
+  stroke: #4a86e8;
+  stroke-width: 2;
+  stroke-dasharray: 0;
+}
+
+#analytics-graph .ct-label {
+  font-size: 14px;
+  fill: #333;
+}
+
+#analytics-graph .ct-grid {
+  stroke: #e5e5e5;
+  stroke-width: 1;
+}
+
+#analytics-graph .ct-pointer {
+  stroke: #333;
+  stroke-width: 2;
+}
+
+#analytics-graph .ct-scale-major {
+  stroke: #ccc;
+  stroke-width: 1;
+}
+
+#analytics-graph .ct-scale-minor {
+  stroke: #e5e5e5;
+  stroke-width: 1;
+}
+```

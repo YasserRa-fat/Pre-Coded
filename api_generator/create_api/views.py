@@ -1,12 +1,12 @@
 # create_api/views.py
 
 from django.forms import ValidationError
-from django.http import Http404
+from django.http import Http404,HttpResponseServerError
 from rest_framework import generics, viewsets, status
 from django.contrib.auth.models import User
 from rest_framework.response import Response
 from rest_framework.decorators import action
-from core.services.ai_editor import call_ai, parse_ai_output
+from core.services.ai_editor import call_ai
 from django.db import transaction
 from .serializers import (UserSerializer, UserModelSerializer, ModelFileSerializer,
  ProjectSerializer,AppSerializer, ViewFileSerializer,FormFileSerializer, ProjectFileSerializer,SettingsFileSerializer,
@@ -41,6 +41,10 @@ from .utils import (
     generate_view_ai_summary_batch, generate_ai_summary,
     generate_form_ai_summary_batch, extract_forms_from_code
 )
+from django.views.decorators.csrf import csrf_exempt
+from django.views.decorators.http import require_GET, require_POST
+from asgiref.sync import sync_to_async
+
 logger = logging.getLogger(__name__)
 
 # --- User & Authentication Endpoints ---
@@ -130,6 +134,29 @@ class AvailableModelsAPIView(APIView):
             models_data[model.__name__] = fields
         return Response(models_data, status=200)
 
+
+class AIConversationViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet for managing AI conversations.
+    Provides standard CRUD operations for AIConversation model.
+    """
+    serializer_class = AIConversationSerializer
+    permission_classes = [IsAuthenticated]
+    
+    def get_queryset(self):
+        """
+        Filter conversations to only return those belonging to the current user
+        and optionally filtered by project_id
+        """
+        queryset = AIConversation.objects.filter(user=self.request.user)
+        project_id = self.request.query_params.get('project_id', None)
+        if project_id is not None:
+            queryset = queryset.filter(project_id=project_id)
+        return queryset.order_by('-created_at')
+    
+    def perform_create(self, serializer):
+        """Automatically set the user when creating a conversation"""
+        serializer.save(user=self.request.user)
 
 class UserModelViewSet(viewsets.ModelViewSet):
     queryset = UserModel.objects.all()
@@ -309,35 +336,45 @@ class GenerateModelSummaryAPIView(APIView):
 
         except Exception as e:
             return Response({"error": str(e)}, status=500)
+
 class SaveModelFileAPIView(generics.GenericAPIView):
     serializer_class = ModelFileSerializer
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk=None):
         data = request.data.copy()
-        instance = None
         is_update = pk is not None
+        instance = None
+        status_code = status.HTTP_201_CREATED
 
         if is_update:
-            # ── UPDATE ──
+            # explicit-update via URL
             instance = get_object_or_404(
                 ModelFile,
                 pk=pk,
                 project__user=request.user
             )
-            # make sure serializer sees the right app
             data.setdefault('app', instance.app.id)
             status_code = status.HTTP_200_OK
         else:
-            # ── CREATE ──
+            # create or implicit‑update by unique key
             app_id = data.get('app') or data.get('app_id')
             if not app_id:
-                return Response(
-                    {"app": ["This field is required."]},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
+                return Response({"app": ["This field is required."]},
+                                status=status.HTTP_400_BAD_REQUEST)
             data['app'] = app_id
-            status_code = status.HTTP_201_CREATED
+
+            # Peek first: do we already have a ModelFile with same (app, name)?
+            # We assume `description` holds the filename (e.g. "models.py")
+            existing = ModelFile.objects.filter(
+                app__id=app_id,
+                name=data.get('description')
+            ).first()
+            if existing:
+                instance = existing
+                status_code = status.HTTP_200_OK
+                # Ensure serializer sees the right app
+                data.setdefault('app', existing.app.id)
 
         serializer = self.get_serializer(
             instance=instance,
@@ -346,25 +383,31 @@ class SaveModelFileAPIView(generics.GenericAPIView):
         )
         serializer.is_valid(raise_exception=True)
 
-        # if creating: we need to set project from the given app
-        if not is_update:
+        if instance is None:
+            # CREATE
             app = serializer.validated_data['app']
             model_file = serializer.save(project=app.project)
         else:
-            # on update, just save—don’t re‑pass project
+            # UPDATE
             model_file = serializer.save()
 
         return Response(
             self.get_serializer(model_file).data,
             status=status_code
         )
-    
+
+    def put(self, request, pk=None):
+        # allow PUT to flow into same codepath
+        return self.post(request, pk=pk)
+
+    def patch(self, request, pk=None):
+        return self.post(request, pk=pk)
     
 class GenerateModelCodeAPIView(generics.GenericAPIView):
     """
     Receives diagram elements (nodes and edges) and generates a complete models.py file.
     Relationships are generated solely from edges if both nodes exist in the diagram.
-    Relationship fields already defined in node data are preserved, and extra fields are only appended if they’re not duplicates.
+    Relationship fields already defined in node data are preserved, and extra fields are only appended if they're not duplicates.
     Custom built-in code (like the User field or image processing logic) is merged for known models.
     """
     permission_classes = [AllowAny]
@@ -591,7 +634,7 @@ class ProjectDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
                        'settings_files',
                        'url_files',
                        'project_files',
-                       # NOW pull in *each* app’s nested file relations:
+                       # NOW pull in *each* app's nested file relations:
                        'apps__model_files',
                        'apps__view_files',
                        'apps__form_files',
@@ -955,6 +998,19 @@ def parse_viewfile(request):
         return Response({"error": str(e)}, status=400)
 
 
+class ModelFileListCreateAPIView(generics.ListCreateAPIView):
+    """
+    GET  /api/model‑files/?app_id=<app_id>  → list all model files for that app
+    POST /api/model‑files/                  → create a new model file
+    """
+    serializer_class = ModelFileSerializer
+
+    def get_queryset(self):
+        qs = ModelFile.objects.all()
+        app_id = self.request.query_params.get('app_id')
+        if app_id:
+            qs = qs.filter(app__id=app_id)
+        return qs
 from rest_framework import generics, status
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
@@ -1572,7 +1628,20 @@ class AppTemplateFileListCreateAPIView(generics.ListCreateAPIView):
             return Response({'errors': errors}, status=status.HTTP_400_BAD_REQUEST)
         return Response(created, status=status.HTTP_201_CREATED)
     
+from rest_framework_simplejwt.views import TokenObtainPairView
 
+class CookieTokenObtainPairView(TokenObtainPairView):
+    def finalize_response(self, request, response, *args, **kwargs):
+        response = super().finalize_response(request, response, *args, **kwargs)
+        # set the access token as an HttpOnly cookie
+        response.set_cookie(
+            "access_token", 
+            response.data["access"], 
+            httponly=True, 
+            samesite="None", 
+            secure=False
+        )
+        return response
 class RunProjectAPIView(APIView):
     """
     Simply returns the URL where the dynamic-in-DB project is mounted.
@@ -1593,123 +1662,570 @@ class DebugDBAlias(APIView):
             "user_state_db": getattr(request.user._state, "db", None),
             "user_pk": request.user.pk,
         })
-class AIConversationViewSet(viewsets.ModelViewSet):
+from django.utils.decorators import method_decorator
+
+
+class PreviewRunAPIView(APIView):
     """
-    list/create are default. We override create to auto-set user.
-    Custom actions:
-      - message/  : POST a user prompt → returns either clarification or diff preview
-      - confirm/  : POST to apply the change requests
+    POST { mode: "before" | "after", change_id? }
+    → { url: "https://…/projects/<id>/?preview_mode=…&preview_change_id=…" }
     """
-    queryset = AIConversation.objects.all()
-    serializer_class = AIConversationSerializer
     permission_classes = [IsAuthenticated]
 
-    def get_queryset(self):
-        # only show your own or staff
-        qs = super().get_queryset()
-        return qs.filter(user=self.request.user)
-
-    def perform_create(self, serializer):
-        # require project, optional app_name/file_path in payload
-        serializer.save(user=self.request.user)
-
-    @action(detail=True, methods=['post'])
-    def message(self, request, pk=None):
-        conv = self.get_object()
-        text = request.data.get("message","").strip()
-        if not text:
-            return Response({"detail":"Empty message."}, status=400)
-
-        # 1) record user message
-        AIMessage.objects.create(conversation=conv, sender='user', text=text)
-
-        # 2) call AI
-        ai_text = call_ai(conv, text)
-        kind, body = parse_ai_output(ai_text)
-
-        # 3) record assistant message
-        AIMessage.objects.create(conversation=conv, sender='assistant', text=ai_text)
-
-        if kind == 'clarify':
-            conv.status = 'awaiting_clarification'
-            conv.save(update_fields=['status'])
-            return Response({"clarification": body})
-        else:
-            # kind == 'diff'
-            # create a draft change request
-            change = AIChangeRequest.objects.create(
-                conversation=conv,
-                file_type=request.data.get('file_type','other'),
-                app_name=conv.app_name,
-                file_path=conv.file_path,
-                diff=body,
+    def post(self, request, project_id):
+        mode = request.data.get('mode', 'before')
+        change_id = request.data.get('change_id')
+        
+        logger.debug(f"Preview run request: project={project_id}, mode={mode}, change_id={change_id}")
+        
+        # Check if all parameters are valid
+        if mode == 'after' and not change_id:
+            logger.error("Missing change_id for after preview")
+            return Response(
+                {"error": "Missing change_id for 'after' mode"},
+                status=status.HTTP_400_BAD_REQUEST
             )
-            conv.status = 'review'
-            conv.save(update_fields=['status'])
-            return Response({
-                "diff": body,
-                "change_id": change.id
-            })
+        
+        try:
+            # If "after" mode, verify the change request exists
+            if mode == 'after' and change_id:
+                try:
+                    change = AIChangeRequest.objects.get(
+                        id=change_id,
+                        project_id=project_id
+                    )
+                    if not change.diff:
+                        logger.error(f"Change request {change_id} has no diff data")
+                        return Response(
+                            {"error": "Change request has no diff data"},
+                            status=status.HTTP_400_BAD_REQUEST
+                        )
+                except AIChangeRequest.DoesNotExist:
+                    logger.error(f"Change request not found: id={change_id}, project_id={project_id}")
+                    return Response(
+                        {"error": "Change request not found"},
+                        status=status.HTTP_404_NOT_FOUND
+                    )
+            
+            # Build the preview URL
+            host = request.get_host()
+            protocol = 'https' if request.is_secure() else 'http'
+            
+            url_params = [f"preview_mode={mode}"]
+            if mode == 'after' and change_id:
+                url_params.append(f"preview_change_id={change_id}")
+            
+            url = f"{protocol}://{host}/projects/{project_id}/?{'&'.join(url_params)}"
+            
+            logger.debug(f"Preview URL generated: {url}")
+            
+            return Response({"url": url})
+            
+        except Exception as e:
+            logger.error(f"Error generating preview URL: {str(e)}")
+            logger.error(traceback.format_exc())
+            return Response(
+                {"error": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
-    @action(detail=True, methods=['post'])
-    def confirm(self, request, pk=None):
-        conv = self.get_object()
-        if conv.status != 'review':
-            return Response({"detail":"No changes to confirm."}, status=400)
+class FullPreviewDiffAPIView(APIView):
+    def post(self, request, project_id, change_id):
+        try:
+            change = AIChangeRequest.objects.get(id=change_id, project_id=project_id)
+            preview_alias = f"preview_{project_id}_after_{change_id}"
+            raw_label = change.app_name.lower()
+            
+            # Setup and run both projects
+            modified_files = setup_preview_project(project_id, preview_alias, raw_label, change_id)
+            
+            # Generate diff data for DiffModal
+            diff_data = generate_diff_data(project_id, change_id, preview_alias, raw_label, modified_files)
+            
+            return Response(diff_data, status=status.HTTP_200_OK)
+        except AIChangeRequest.DoesNotExist:
+            logger.error(f"AIChangeRequest {change_id} not found for project {project_id}")
+            return Response({"error": "ChangeRequest not found"}, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            logger.error(f"Error generating preview diff: {e}")
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-        change_id = request.data.get("change_id")
-        change = get_object_or_404(AIChangeRequest, pk=change_id, conversation=conv)
+def generate_diff_data(project_id, change_id, preview_alias, raw_label, modified_files):
+    """
+    Generate data for DiffModal, including code diffs and preview URLs.
+    """
+    change = AIChangeRequest.objects.get(id=change_id, project_id=project_id)
+    diff = json.loads(change.diff)
+    
+    # Prepare files array for DiffModal
+    files = []
+    for path in modified_files:
+        # Original content
+        original_content = FileIndexer.get_content(path) or ''
+        # Updated content
+        updated_content = diff.get(path, original_content)
+        
+        files.append({
+            'filePath': path,
+            'before': original_content,
+            'after': updated_content,
+            'projectId': project_id,
+            'changeId': change_id
+        })
+    
+    # Generate preview URLs
+    preview_map = {
+        'before': f"/projects/{project_id}/",
+        'after': f"/projects/{project_id}/preview/{change_id}/"
+    }
+    
+    return {
+        'files': files,
+        'previewMap': preview_map,
+        'change_id': change_id
+    }
 
-        # apply the diff to the DB-backed file model
-        from create_api.models import TemplateFile, ModelFile, ViewFile, FormFile, AppFile, SettingsFile, URLFile
-        FILE_MODEL = {
-            'template': TemplateFile,
-            'model':     ModelFile,
-            'view':      ViewFile,
-            'form':      FormFile,
-            'other':     AppFile,
-        }.get(change.file_type, AppFile)
 
-        # find the existing file record
-        if change.file_type in ('template','other'):
-            obj = FILE_MODEL.objects.filter(
-                project=conv.project,
-                app__name=change.app_name if change.app_name else None,
-                path=change.file_path
-            ).first()
-        else:
-            obj = FILE_MODEL.objects.filter(
-                project=conv.project,
-                app__name=change.app_name if change.app_name else None,
-                name=change.file_path.split('/')[-1]
-            ).first()
 
-        if not obj:
-            return Response({"detail":"Original file not found."}, status=404)
-
-        # apply the unified diff: we naively patch the content here
-        import difflib
-        original = obj.content.splitlines(keepends=True)
-        patched = list(difflib.restore(change.diff.splitlines(), 1))
-        obj.content = "".join(patched)
-        obj.save()
-
-        # if it's a model change, run makemigrations & migrate
-        if change.file_type == 'model':
-            from django.core.management import call_command
-            app_label = obj.app._meta.label_lower
-            call_command("makemigrations", app_label, interactive=False)
-            call_command("migrate", app_label, database=request.project_db_alias, interactive=False)
-
+from django.db import transaction
+import json 
+from django.http import HttpResponse
+def apply_changes_to_project(project_id, change_id):
+    """
+    Save all modified files from AIChangeRequest to the project's database.
+    """
+    change = AIChangeRequest.objects.get(id=change_id, project_id=project_id)
+    diff = json.loads(change.diff)
+    app_name = change.app_name.split('_', 2)[2] if '_' in change.app_name else change.app_name
+    
+    file_models = {
+        'model': ModelFile,
+        'view': ViewFile,
+        'form': FormFile,
+        'template': TemplateFile,
+        'static': StaticFile,
+        'app': AppFile,
+        'settings': SettingsFile,
+        'url': URLFile,
+        'project': ProjectFile,
+        'media': MediaFile
+    }
+    
+    with transaction.atomic():
+        for path, content in diff.items():
+            # Determine file type and app
+            parts = path.split('/')
+            app = None
+            if len(parts) > 1 and parts[0] in App.objects.filter(project_id=project_id).values_list('name', flat=True):
+                app_name_from_path = parts[0]
+                app = App.objects.get(project_id=project_id, name=app_name_from_path)
+                rel_path = '/'.join(parts[1:])
+            else:
+                rel_path = path
+            
+            # Match file type
+            model = None
+            for file_type, model_class in file_models.items():
+                if change.file_type == file_type or path.endswith(('.py', '.html', '.css', '.js')):
+                    model = model_class
+                    break
+            
+            if not model:
+                model = AppFile  # Fallback to AppFile for unknown types
+            
+            # Update or create file
+            defaults = {'content': content, 'project_id': project_id}
+            if app:
+                defaults['app'] = app
+            
+            model.objects.update_or_create(
+                project_id=project_id,
+                path=rel_path,
+                app=app,
+                defaults=defaults
+            )
+            logger.debug(f"Saved {model.__name__}: {path}")
+        
+        # Mark change as applied
         change.status = 'applied'
-        change.save(update_fields=['status'])
-        conv.status = 'closed'
-        conv.save(update_fields=['status'])
-        return Response({"detail":"Changes applied."})
+        change.save()
 
-    @action(detail=True, methods=['post'])
-    def cancel(self, request, pk=None):
-        conv = self.get_object()
-        conv.status = 'cancelled'
-        conv.save(update_fields=['status'])
-        return Response({"detail":"Conversation cancelled."})
+
+class ApplyChangesAPIView(APIView):
+    def post(self, request, project_id, change_id):
+        try:
+            apply_changes_to_project(project_id, change_id)
+            return Response({"message": "Changes applied successfully"}, status=status.HTTP_200_OK)
+        except AIChangeRequest.DoesNotExist:
+            logger.error(f"AIChangeRequest {change_id} not found for project {project_id}")
+            return Response({"error": "ChangeRequest not found"}, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            logger.error(f"Error applying changes: {e}")
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+import traceback
+import os
+from core.services.file_indexer import FileIndexer
+from django.template import Engine, RequestContext, TemplateDoesNotExist, Context
+from django.templatetags.static import static as static_tag
+from django.template import engines
+from django.contrib.auth.mixins import LoginRequiredMixin
+from django.views.decorators.http import require_GET
+# ————————————————————————————————————————————————————————————————————————————
+# 1) Simple "preview_view" for any file type (just dumps raw or patched content)
+# ————————————————————————————————————————————————————————————————————————————
+@require_GET
+@csrf_exempt
+def preview_view(request, project_id):
+    change_id = request.GET.get("change_id")
+    mode = request.GET.get("mode", "after")
+    file_path = request.GET.get("file", "")  # Keep using "file" as the parameter name for backwards compatibility
+
+    logger.debug(f"Preview request: project={project_id}, change={change_id}, mode={mode}, file={file_path}")
+
+    if not change_id and mode == "after":
+        logger.error(f"Missing change_id for after preview: {request.GET}")
+        return HttpResponse(status=400, content="Missing change_id for 'after' preview")
+
+    try:
+        change = AIChangeRequest.objects.get(pk=change_id, project_id=project_id) if change_id else None
+        
+        # First try to get content from the diff directly, for the "after" mode
+        content = None
+        if mode == "after" and change:
+            # Get new content from diff
+            diff_data = json.loads(change.diff or "{}")
+            
+            # Check if file is in the diff and has content
+            if file_path in diff_data:
+                file_data = diff_data[file_path]
+                # Extract content depending on structure
+                if isinstance(file_data, str):
+                    content = file_data
+                    logger.debug(f"Found string content for {file_path} in diff")
+                elif isinstance(file_data, dict):
+                    # Try different possible keys where content might be stored
+                    for key in ['content', 'after', 'preview']:
+                        if key in file_data:
+                            if key == 'preview' and isinstance(file_data[key], dict) and 'after' in file_data[key]:
+                                content = file_data[key]['after']
+                                logger.debug(f"Found content in diff at {file_path}.preview.after")
+                                break
+                            elif isinstance(file_data[key], str):
+                                content = file_data[key]
+                                logger.debug(f"Found content in diff at {file_path}.{key}")
+                                break
+                    
+                    if not content:
+                        logger.warning(f"Could not extract content from diff data for {file_path}: {file_data.keys()}")
+        
+        # If content is still None, try getting original content for "before" mode or as fallback
+        if content is None:
+            original_content = ""
+            if file_path.startswith("templates/"):
+                try:
+                    orig_file = TemplateFile.objects.get(
+                        project_id=project_id, 
+                        path=file_path.replace("templates/", "")
+                    )
+                    original_content = orig_file.content or ""
+                    logger.debug(f"Found template file: {file_path}")
+                except TemplateFile.DoesNotExist:
+                    logger.warning(f"TemplateFile not found: project_id={project_id}, path={file_path}")
+            else:
+                try:
+                    orig_file = StaticFile.objects.get(project_id=project_id, path=file_path)
+                    original_content = orig_file.content or ""
+                    logger.debug(f"Found static file: {file_path}")
+                except StaticFile.DoesNotExist:
+                    logger.warning(f"StaticFile not found: project_id={project_id}, path={file_path}")
+            
+            # Use original content for "before" mode or as fallback if we couldn't get "after" content
+            if mode == "before" or content is None:
+                content = original_content
+                logger.debug(f"Using original content for {file_path} in mode={mode}")
+
+        # Check preview directory as final fallback
+        if not content:
+            alias = f"preview_{project_id}_after_{change_id}"
+            preview_dir = os.path.join(settings.PREVIEW_ROOT, "dynamic_apps_preview", alias)
+            preview_path = os.path.join(preview_dir, file_path)
+            
+            if os.path.exists(preview_path):
+                with open(preview_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+                logger.debug(f"Loaded content from preview directory: {preview_path}")
+        
+        # If we still have no content, return 404
+        if not content:
+            logger.error(f"No content found for {file_path} in mode={mode}")
+            return HttpResponse(status=404, content=f"No content found for {file_path}")
+
+        # Determine the content type based on file extension
+        ext = os.path.splitext(file_path)[1].lower()
+        content_type = {
+            '.html': 'text/html',
+            '.css': 'text/css',
+            '.js': 'application/javascript',
+            '.json': 'application/json',
+            '.txt': 'text/plain',
+            '.py': 'text/plain',
+        }.get(ext, 'text/plain')
+
+        # Log successful preview generation
+        logger.debug(f"Returning {len(content)} bytes for {file_path} as {content_type}")
+        
+        # Return the content with appropriate content type
+        return HttpResponse(content, content_type=content_type)
+
+    except Exception as e:
+        logger.error(f"Error in preview_view: {e}")
+        logger.error(traceback.format_exc())
+        return HttpResponse(status=500, content=f"Error: {str(e)}")
+
+    except AIChangeRequest.DoesNotExist:
+        logger.error(f"AIChangeRequest not found: pk={change_id}, project_id={project_id}")
+        return HttpResponse(status=404)
+    except Exception as e:
+        logger.exception(f"Error in preview_view: {str(e)}")
+        return HttpResponseServerError(f"Server error: {str(e)}")
+
+    except AIChangeRequest.DoesNotExist:
+        logger.error(f"AIChangeRequest not found: pk={change_id}, project_id={project_id}")
+        return HttpResponse(status=404)
+    except Exception as e:
+        logger.exception(f"Error in preview_view: {str(e)}")
+        return HttpResponseServerError(f"Server error: {str(e)}")
+
+
+# ————————————————————————————————————————————————————————————————————————————
+# 2) "PreviewOneView" that actually renders via the real template engine
+# ————————————————————————————————————————————————————————————————————————————
+from rest_framework_simplejwt.authentication import JWTAuthentication
+# core/views.py
+
+from rest_framework_simplejwt.authentication import JWTAuthentication
+from django.template import engines
+from django.core.cache import cache
+
+class PreviewOneView(APIView):
+    def get(self, request, project_id, change_id):
+        file_path = request.GET.get("file")
+        mode = request.GET.get("mode", "after")
+
+        if not file_path:
+            return Response({"error": "Missing file parameter"}, status=400)
+
+        try:
+            change = AIChangeRequest.objects.get(id=change_id, project_id=project_id)
+            raw_label = change.app_name.lower()
+            preview_dir = os.path.join(
+                settings.PREVIEW_ROOT,
+                "dynamic_apps_preview",
+                f"preview_{project_id}_after_{change_id}_{raw_label}"
+            )
+            # Configure template engine to prioritize preview directory
+            engine = Engine(dirs=[preview_dir], app_dirs=True, debug=True)
+            engines['django'] = engine
+
+            diff = json.loads(change.diff or "{}")
+            patched_content = diff.get(file_path)
+
+            context = {"request": request, "user": request.user, "posts": []}
+
+            if file_path.endswith(".html"):
+                if mode == "before" or not patched_content:
+                    try:
+                        template = engine.get_template(file_path.replace("templates/", "") if file_path.startswith("templates/") else file_path)
+                        rendered = template.render(context, request)
+                        return HttpResponse(rendered, content_type="text/html")
+                    except TemplateDoesNotExist:
+                        return Response({"error": "Template not found"}, status=404)
+                else:
+                    template = engine.from_string(patched_content)
+                    rendered = template.render(context, request)
+                    return HttpResponse(rendered, content_type="text/html")
+            else:
+                # Handle static files
+                if mode == "before":
+                    try:
+                        static_file = StaticFile.objects.get(project_id=project_id, path=file_path)
+                        content = static_file.content or ""
+                    except StaticFile.DoesNotExist:
+                        logger.warning(f"StaticFile not found: project_id={project_id}, path={file_path}")
+                        return Response({"error": "Static file not found"}, status=404)
+                else:
+                    content = patched_content or ""
+                    if not content:
+                        try:
+                            static_file = StaticFile.objects.get(project_id=project_id, path=file_path)
+                            content = static_file.content or ""
+                        except StaticFile.DoesNotExist:
+                            logger.warning(f"StaticFile not found: project_id={project_id}, path={file_path}")
+                            return Response({"error": "Static file not found"}, status=404)
+
+                if os.path.exists(os.path.join(preview_dir, file_path)):
+                    with open(os.path.join(preview_dir, file_path), "r", encoding="utf-8") as f:
+                        content = f.read()
+                    logger.debug(f"Loaded content from preview directory: {os.path.join(preview_dir, file_path)}")
+
+                return HttpResponse(content, content_type="text/plain")
+
+        except AIChangeRequest.DoesNotExist:
+            return Response({"error": "ChangeRequest not found"}, status=404)
+        except Exception as e:
+            logger.exception(f"Error in PreviewOneView: {str(e)}")
+            return Response({"error": str(e)}, status=500)
+
+@require_GET
+def preview_project(request, project_id):
+    """
+    Preview a project's current state or a specific change.
+    """
+    try:
+        # Get preview mode and change ID from query params
+        preview_mode = request.GET.get('mode', 'current')  # current, before, after
+        change_id = request.GET.get('change_id')
+        
+        # Get the project
+        try:
+            project = Project.objects.get(id=project_id)
+        except Project.DoesNotExist:
+            logger.error(f"Project {project_id} not found")
+            return JsonResponse({'error': 'Project not found'}, status=404)
+        
+        # Set up preview context
+        context = {
+            'project': project,
+            'preview_mode': preview_mode,
+            'change_id': change_id
+        }
+        
+        # If previewing a change, add the change data
+        if change_id and preview_mode in ['before', 'after']:
+            try:
+                change = AIChangeRequest.objects.get(id=change_id)
+                diff_data = json.loads(change.diff or '{}')
+                context['change'] = change
+                context['diff_data'] = diff_data
+            except AIChangeRequest.DoesNotExist:
+                logger.error(f"Change {change_id} not found")
+                return JsonResponse({'error': 'Change not found'}, status=404)
+            except json.JSONDecodeError:
+                logger.error(f"Invalid JSON in change {change_id}")
+                return JsonResponse({'error': 'Invalid change data'}, status=400)
+        
+        # Render the preview template
+        template_path = 'preview/project.html'
+        try:
+            return render(request, template_path, context)
+        except Exception as e:
+            logger.error(f"Error rendering preview template: {str(e)}")
+            return JsonResponse({'error': 'Error rendering preview'}, status=500)
+        
+    except Exception as e:
+        logger.error(f"Error in preview_project: {str(e)}")
+        logger.error(traceback.format_exc())
+        return JsonResponse({'error': str(e)}, status=500)
+
+def preview_project(request, project_id, preview_alias, raw_label, ai_diff_code=None):
+    """
+    Preview a project's current state or a specific change.
+    
+    Args:
+        request (HttpRequest): The request object
+        project_id (int): The ID of the project to preview
+        preview_alias (str): The alias for the preview database
+        raw_label (str): The raw label for the app
+        ai_diff_code (str, optional): The AI-generated diff code to apply
+    """
+    try:
+        # Get the project
+        try:
+            project = Project.objects.get(id=project_id)
+        except Project.DoesNotExist:
+            logger.error(f"Project {project_id} not found")
+            return JsonResponse({'error': 'Project not found'}, status=404)
+        
+        # Set up preview context
+        context = {
+            'project': project,
+            'preview_alias': preview_alias,
+            'raw_label': raw_label,
+            'ai_diff_code': ai_diff_code
+        }
+        
+        # If we have AI diff code, apply it to the preview
+        if ai_diff_code:
+            try:
+                # Parse the diff code
+                diff_data = json.loads(ai_diff_code)
+                context['diff_data'] = diff_data
+                
+                # Apply changes to preview database
+                with transaction.atomic(using=preview_alias):
+                    # TODO: Apply changes to preview database
+                    pass
+                    
+            except json.JSONDecodeError:
+                logger.error(f"Invalid JSON in AI diff code")
+                return JsonResponse({'error': 'Invalid diff data'}, status=400)
+            except Exception as e:
+                logger.error(f"Error applying AI diff code: {str(e)}")
+                return JsonResponse({'error': 'Error applying changes'}, status=500)
+        
+        # Render the preview template
+        template_path = 'preview/project.html'
+        try:
+            return render(request, template_path, context)
+        except Exception as e:
+            logger.error(f"Error rendering preview template: {str(e)}")
+            return JsonResponse({'error': 'Error rendering preview'}, status=500)
+        
+    except Exception as e:
+        logger.error(f"Error in preview_project: {str(e)}")
+        logger.error(traceback.format_exc())
+        return JsonResponse({'error': str(e)}, status=500)
+
+@sync_to_async
+def setup_preview_project(project_id, preview_alias, raw_label, change_id=None):
+    """
+    Set up a preview project with optional AI changes.
+    
+    Args:
+        project_id (int): The ID of the project to preview
+        preview_alias (str): The alias for the preview database
+        raw_label (str): The raw label for the app
+        change_id (int, optional): The ID of the AI change request to apply
+    
+    Returns:
+        list: A list of modified file paths
+    """
+    try:
+        # Get the project
+        try:
+            project = Project.objects.get(id=project_id)
+        except Project.DoesNotExist:
+            logger.error(f"Project {project_id} not found")
+            raise Http404(f"Project {project_id} not found")
+
+        # Get AI changes if change_id provided
+        modified_files = []
+        if change_id:
+            try:
+                change = AIChangeRequest.objects.get(id=change_id)
+                diff = json.loads(change.diff or "{}")
+                for file_path, changes in diff.items():
+                    if "after" in changes.get("preview", {}):
+                        modified_files.append(file_path)
+            except AIChangeRequest.DoesNotExist:
+                logger.error(f"Change request {change_id} not found")
+                raise Http404(f"Change request {change_id} not found")
+            except Exception as e:
+                logger.error(f"Error applying changes: {str(e)}")
+                raise
+
+        return modified_files
+
+    except Exception as e:
+        logger.error(f"Error in setup_preview_project: {str(e)}")
+        raise

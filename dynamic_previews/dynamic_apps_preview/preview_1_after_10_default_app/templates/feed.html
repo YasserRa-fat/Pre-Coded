@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% load static %}
+{% block content %}
+<h1>Welcome {{ user.username }}</h1>
+{% for post in posts %}
+<div>{{ post.title }}</div>
+{% endfor %}
+<div class="analytics-container">
+<canvas id="analytics"></canvas>
+<script src="{% static 'js/chart.js' %}"></script>
+<script>
+const labels = {{ comment_labels|safe }};
+const data = {{ comment_data|safe }};
+new Chart(document.getElementById('analytics'), {
+type: 'bar',
+data: {
+labels: labels,
+datasets: [{
+label: 'Comments (Past 10 Days)',
+backgroundColor: 'rgba(0, 0, 255, 0.2)', // Blue
+borderColor: 'rgba(0, 0, 255, 1)', // Blue
+borderWidth: 1,
+data: data
+}, {
+label: 'Another Metric',
+backgroundColor: 'rgba(255, 0, 0, 0.2)', // Red
+borderColor: 'rgba(255, 0, 0, 1)', // Red
+borderWidth: 1,
+data: data // Replace with actual data for the second metric if needed
+}]
+},
+options: {
+scales: {
+y: {
+beginAtZero: true
+}
+}
+}
+});
+</script>
+</div>
+{% endblock %}

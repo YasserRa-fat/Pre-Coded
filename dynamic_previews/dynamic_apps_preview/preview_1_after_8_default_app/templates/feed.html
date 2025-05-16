@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% load static %}
+{% block content %}
+<div class="analytics-container">
+<canvas id="analytics"></canvas>
+<script src="{% static 'js/chart.js' %}"></script>
+<script>
+const labels = {{ comment_labels|safe }};
+const data = {{ comment_data|safe }};
+new Chart(document.getElementById('analytics'), {
+type: 'bar',
+data: {
+labels: labels,
+datasets: [{
+label: 'Comments (Past 10 Days)',
+data: data
+}]
+}
+});
+</script>
+</div>
+{% endblock %}

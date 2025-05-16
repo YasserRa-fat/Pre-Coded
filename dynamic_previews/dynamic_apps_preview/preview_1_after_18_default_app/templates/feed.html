@@ -1,0 +1,138 @@
+{% extends "base.html" %}
+{% block content %}
+---
+To add a new div for the analytics graph below the posts loop in the feed.html template, you can follow these steps:
+1. Add the Chart.js library to your Django project. You can do this by adding the following line to your base.html template inside the head section:
+```html
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+```
+2. Add a new div for the analytics graph below the posts loop in the feed.html template. You can do this by adding the following code below the posts loop:
+```html
+<div class="row mt-5">
+  <div class="col-md-6 offset-md-3">
+    <canvas id="analyticsChart"></canvas>
+  </div>
+</div>
+```
+3. Add the JavaScript code to generate the chart. You can do this by adding the following code to the bottom of the feed.html template, after the other JavaScript code:
+```html
+<script>
+  var ctx = document.getElementById('analyticsChart').getContext('2d');
+  var analyticsChart = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'],
+      datasets: [{
+        label: 'Analytics',
+        data: [12, 19, 3, 5, 2, 3, 7, 8, 9, 10, 11, 12],
+        backgroundColor: [
+          'rgba(255, 99, 132, 0.2)',
+          'rgba(54, 162, 235, 0.2)',
+          'rgba(255, 206, 86, 0.2)',
+          'rgba(75, 192, 192, 0.2)',
+          'rgba(153, 102, 255, 0.2)',
+          'rgba(255, 159, 64, 0.2)'
+        ],
+        borderColor: [
+          'rgba(255, 99, 132, 1)',
+          'rgba(54, 162, 235, 1)',
+          'rgba(255, 206, 86, 1)',
+          'rgba(75, 192, 192, 1)',
+          'rgba(153, 102, 255, 1)',
+          'rgba(255, 159, 64, 1)'
+        ],
+        borderWidth: 1
+      }]
+    },
+    options: {
+      scales: {
+        y: {
+          beginAtZero: true
+        }
+      }
+    }
+  });
+</script>
+```
+This will generate a bar chart using the Chart.js library, with the labels being the months of the year and the data being random numbers. You can replace the data with your own analytics data.
+Here is the complete updated HTML code for the feed.html template:
+```html
+<!DOCTYPE HTML>
+<!--
+	Justice by gettemplates.co
+	Twitter: http://twitter.com/gettemplateco
+	URL: http://gettemplates.co
+-->
+<html>
+  <head>
+    <meta charset="utf-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <title>{{post.title}} </title>
+    <meta name="viewport" content="width=device-width, initial-scale=1"
+    <link href="https://fonts.googleapis.com/css?family=Crimson+Text:400,400i|Roboto+Mono" rel="stylesheet">
+    <!-- Animate.css -->
+    <link rel="stylesheet" href="{% static 'css/animate.css' %}">
+    <!-- Icomoon Icon Fonts-->
+    <link rel="stylesheet" href="{% static 'css/icomoon.css' %}">
+    <!-- Bootstrap  -->
+    <link rel="stylesheet" href="{% static 'css/bootstrap.css' %}">
+    <!-- Magnific Popup -->
+    <link rel="stylesheet" href="{% static 'css/magnific-popup.css' %}">
+    <!-- Theme style  -->
+    <link rel="stylesheet" href="{% static 'css/style.css' %}">
+    <!-- Modernizr JS -->
+    <script src="{% static 'js/modernizr-2.6.2.min.js' %}"></script>
+    <!-- FOR IE9 below -->
+    <!--[if lt IE 9]>
+	<script src="js/respond.min.js"></script>
+	<![endif]-->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  </head>
+  <body>
+    <div class="gtco-loader"></div>
+    <div id="page">
+      <nav class="gtco-nav" role="navigation\">
+        <div class="container\">
+          <div class="row\">
+            <div class="col-xs-2 text-left\">
+              <div id="gtco-logo"><a href="index.html">Engineers<span>.</span></a></div>
+            </div>
+            <div class="col-xs-10 text-right menu-1\">
+              <ul>
+                <li><a href="{% url 'logout' %}">Logout</a></li>
+                <li><a href="{% url 'home' %}">Profile</a></li>
+                <li><a href="{% url 'login' %}">Login</a></li>
+                <li><a href="{% url 'register' %}">Register</a></li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </nav>
+      <header id="gtco-header" class="gtco-cover" role="banner"
+        style="background-image:url({% static 'images/img_4.jpg' %});" data-stellar-background-ratio="0.5\">
+        <div class="overlay"></div>
+        <div class="container\">
+          <div class="row\">
+            <div class="col-md-7 text-left\">
+              <div class="display-t\">
+                <div class="display-tc animate-box" data-animate-effect="fadeInUp\">
+                  <span class="date-post">{{post.created_at}}</span>
+                  <h1 class="mb30"><a href="#">{{post.title}}</a></h1>
+                  <p>by <a href="#" class="text-link">{{post.user}}</a></p>
+                  <p><a href="#" class="text-link">{{comment.user}}'s comment</a></p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </header>
+      <div id="gtco-maine\">
+        <div class="container\">
+          <div class="row row-pb-md\">
+            <div class="col-md-12\">
+              <article class="mt-negative\">
+                <div class="text-left content-article\">
+                  <div class="row row-pb-sm\">
+                    <div class="col-lg-6 col-md-12 animate-box\">
+                      <figure
+{% endblock %}

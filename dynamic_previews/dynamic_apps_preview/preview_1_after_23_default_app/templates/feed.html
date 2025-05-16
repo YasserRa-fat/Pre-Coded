@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% load static %}
+{% block content %}
+```html
+<div class="analytics-graph">
+    <canvas id="analyticsChart"></canvas>
+</div>
+
+{% for post in posts %}
+<article class="post">
+    <header class="post-header">
+        <h2><a href="{% url 'post-detail' post.id %}">{{ post.title }}</a></h2>
+    </header>
+    <div class="post-content">
+        {{ post.content|safe }}
+    </div>
+    <footer class="post-footer">
+        <p class="post-meta">
+            {{ post.author }} &middot; {{ post.created_at }}
+        </p>
+    </footer>
+</article>
+{% endfor %}
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script>
+const analyticsChart = new Chart(document.getElementById('analyticsChart'), {
+    type: 'line',
+    data: {
+        labels: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
+        datasets: [{
+            label: 'Number of Comments',
+            data: {{ comments_data|safe }},
+            backgroundColor: 'rgba(75, 192, 192, 0.2)',
+            borderColor: 'rgba(75, 192, 192, 1)',
+            borderWidth: 1
+        }]
+    },
+    options: {
+        scales: {
+            y: {
+                beginAtZero: true
+            }
+        }
+    }
+});
+</script>
+```
+{% endblock %}

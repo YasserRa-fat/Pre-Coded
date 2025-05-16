@@ -79,7 +79,7 @@ const ModelDiagram = ({ initialNodes = [], initialEdges = [] }) => {
     if (!fileId) return;
     (async () => {
       try {
-        const res = await fetch(`/api/model-file/?fileId=${fileId}`, {
+        const res = await fetch(`/api/model-files/${fileId}/`, {
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         });
         if (!res.ok) throw new Error('Load failed');
@@ -298,7 +298,7 @@ const ModelDiagram = ({ initialNodes = [], initialEdges = [] }) => {
 
     // Check existing
     try {
-      const res = await fetch(`/api/model-file/?app_id=${appId}`, {
+      const res = await fetch(`/api/model-files/?app_id=${appId}`, {
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
       });
       if (res.ok) {

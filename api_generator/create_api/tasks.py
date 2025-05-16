@@ -12,7 +12,7 @@ from django_q.tasks import async_task
 BASE_DIR = Path(__file__).resolve().parent.parent
 env_path = BASE_DIR.parent / ".env"
 
-TOGETHER_AI_API_KEY='5c5f7514a2e2bde8bda4e086fe17ddc0c7e76a8a41e29e908761139b358dfb11'
+TOGETHER_AI_API_KEY='dae837c6d117d8344590e0ca0d86166eebc517c50f73fd88610482f3fdfe6e00'
 # 🛠 Local imports
 from .models import (
     AIConversation, AIMessage, AIChangeRequest,

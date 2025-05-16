@@ -1,32 +1,32 @@
 import os
 import shutil
 import tempfile
-
+import logging
 from django.conf import settings
-from django.db.models.signals import post_save,pre_delete
+from django.db.models.signals import post_save, pre_delete, post_migrate
 from django.dispatch import receiver
 from django.core.management import call_command
-from create_api.models import MediaFile, Project
+from django.db import transaction
 from django.db import models
-
-from .models import (
+import time
+from create_api.models import (
     Project, App,
     ProjectFile, AppFile,
     TemplateFile, SettingsFile, URLFile,
     StaticFile, MediaFile, ModelFile, ViewFile, FormFile
 )
 
+logger = logging.getLogger(__name__)
+
+
 def write_codefile(model, project, app, rel_path, real_path, **extra):
     """
     Read the file on disk, then create `model` with exactly the fields
-    it actually defines (no spurious `app=None` on project‐only models).
+    it actually defines (no spurious `app=None` on project-only models).
     """
-
-    # 1) Read content
     with open(real_path, encoding='utf-8') as f:
         content = f.read()
 
-    # 2) Base kwargs always include project, path, name, content
     kwargs = {
         'project': project,
         'path': rel_path.replace(os.sep, '/'),
@@ -35,12 +35,10 @@ def write_codefile(model, project, app, rel_path, real_path, **extra):
         **extra,
     }
 
-    # 3) Only add `app` if that field actually exists on the model
     field_names = {f.name for f in model._meta.get_fields()}
     if 'app' in field_names and app is not None:
         kwargs['app'] = app
 
-    # 4) Create it
     model.objects.create(**kwargs)
 
 
@@ -48,27 +46,21 @@ def write_codefile(model, project, app, rel_path, real_path, **extra):
 def create_project_skeleton(sender, instance, created, **kwargs):
     if not created:
         return
-
     with tempfile.TemporaryDirectory() as temp_dir:
         call_command('startproject', instance.name, temp_dir)
         project_root = os.path.join(temp_dir, instance.name)
         manage_py = os.path.join(temp_dir, 'manage.py')
 
-        # manage.py
         if os.path.exists(manage_py):
-            write_codefile(ProjectFile, instance, None,
-                           'manage.py', manage_py)
+            write_codefile(ProjectFile, instance, None, 'manage.py', manage_py)
 
-        # standard project files
         for fname in ('__init__.py', 'settings.py', 'urls.py', 'wsgi.py', 'asgi.py'):
             real = os.path.join(project_root, fname)
             if not os.path.exists(real):
                 continue
-
-            # if urls.py already recorded, skip
             if fname == 'urls.py' and URLFile.objects.filter(
-                project=instance, app__isnull=True, name='urls.py'
-            ).exists():
+                    project=instance, app__isnull=True, name='urls.py'
+                ).exists():
                 continue
 
             model = {
@@ -84,33 +76,25 @@ def create_project_skeleton(sender, instance, created, **kwargs):
 def create_app_skeleton(sender, instance, created, **kwargs):
     if not created:
         return
-
     with tempfile.TemporaryDirectory() as temp_dir:
         app_dir = os.path.join(temp_dir, instance.name)
         os.makedirs(app_dir, exist_ok=True)
         call_command('startapp', instance.name, app_dir)
 
-        for rel in ('__init__.py', 'admin.py', 'apps.py',
-                    'models.py', 'tests.py', 'views.py', 'urls.py', 'forms.py'):
-
+        for rel in ('__init__.py', 'admin.py', 'apps.py', 'models.py', 'tests.py', 'views.py', 'urls.py', 'forms.py'):
             real = os.path.join(app_dir, rel)
-
-            # If the app already has a urls.py record, skip
             if rel == 'urls.py' and URLFile.objects.filter(
-                project=instance.project, app=instance, name='urls.py'
-            ).exists():
+                    project=instance.project, app=instance, name='urls.py'
+                ).exists():
                 continue
 
             if not os.path.exists(real):
-                if rel == 'forms.py':
-                    stub = '# Sample forms.py content'
-                elif rel == 'urls.py':
-                    stub = 'from django.urls import path\n\nurlpatterns = []\n'
-                else:
-                    continue
-
-                with open(real, 'w', encoding='utf-8') as f:
-                    f.write(stub)
+                stub = None
+                if rel == 'forms.py': stub = '# Sample forms.py content'
+                if rel == 'urls.py': stub = 'from django.urls import path\n\nurlpatterns = []\n'
+                if stub:
+                    with open(real, 'w', encoding='utf-8') as f:
+                        f.write(stub)
 
             model = {
                 'models.py': ModelFile,
@@ -118,24 +102,15 @@ def create_app_skeleton(sender, instance, created, **kwargs):
                 'forms.py': FormFile,
                 'urls.py': URLFile,
             }.get(rel, AppFile)
+            write_codefile(model, instance.project, instance, os.path.join(instance.name, rel), real)
 
-            write_codefile(model, instance.project, instance,
-                           os.path.join(instance.name, rel), real)
-
-        # migrations/__init__.py
         mig_init = os.path.join(app_dir, 'migrations', '__init__.py')
         if not os.path.exists(mig_init):
             os.makedirs(os.path.dirname(mig_init), exist_ok=True)
             with open(mig_init, 'w', encoding='utf-8') as f:
-                f.write('# Sample __init__.py content')
-            write_codefile(AppFile, instance.project, instance,
-                           os.path.join(instance.name, 'migrations', '__init__.py'), mig_init)
+                f.write('# Migrations package init')
+            write_codefile(AppFile, instance.project, instance, os.path.join(instance.name, 'migrations', '__init__.py'), mig_init)
 
-        # templates, static, media as before…
-        # (the helper will pick up the right FK fields)
-
-
-        # App-level templates / static / media
         for folder_name, model, extra in [
             ('templates', TemplateFile, {'is_app_template': True}),
             ('static', StaticFile, {'file_type': 'other'}),
@@ -144,83 +119,87 @@ def create_app_skeleton(sender, instance, created, **kwargs):
             root = os.path.join(app_dir, folder_name)
             if not os.path.isdir(root):
                 os.makedirs(root, exist_ok=True)
-
             for dirpath, _, files in os.walk(root):
                 for fn in files:
                     real = os.path.join(dirpath, fn)
                     rel = os.path.relpath(real, temp_dir)
-                    print(f"Writing {rel} as {model.__name__} for app {instance.name}")
-                    write_codefile(model, instance.project, instance, rel, real, is_project_file=False, **extra)
+                    write_codefile(model, instance.project, instance, rel, real, **extra)
 
-from core.startup import dynamic_register_apps, dynamic_register_and_dump
-from django.db import transaction
 
 @receiver(post_save, sender=ModelFile)
 def rebuild_and_migrate(sender, instance, created, **kwargs):
-    """
-    Whenever a ModelFile is changed in the DB:
-      1) rewrite models.py on disk
-      2) makemigrations for that app
-      3) migrate that app’s database
-    """
-    # 1) re-register & dump the dynamic apps so the new models.py is on disk
+    # refresh dynamic apps on disk
+    from core.startup import dynamic_register_apps, dynamic_register_and_dump
     dynamic_register_apps()
     dynamic_register_and_dump()
-
-    # We only want to run makemigrations/migrate after the current DB transaction commits
     transaction.on_commit(lambda: _make_and_apply(instance))
 
-
 def _make_and_apply(instance):
-    # derive the django app label, e.g. project_1_posts
     label = f"project_{instance.project_id}_{instance.app.name}"
     db_alias = f"project_{instance.project_id}"
 
-    # 2) generate a new migration for just that app
-    call_command("makemigrations", label, interactive=False, verbosity=1)
+    # Generate migrations for dynamic app
+    try:
+        call_command('makemigrations', label, interactive=False, verbosity=1)
+    except LookupError as e:
+        logger.warning(f"Skipping makemigrations for '{label}': no models found ({e})")
+        return
+    except Exception as e:
+        logger.error(f"Unexpected error during makemigrations for '{label}': {e}")
+        return
 
-    # 3) apply it to that project’s DB
-    call_command("migrate", label, database=db_alias, interactive=False, verbosity=1)
-def get_project_from_app_label(label):
-    # labels look like "project_1_users" or "project_1_posts"
-    parts = label.split("_")
-    if len(parts) >= 2 and parts[1].isdigit():
-        return Project.objects.filter(id=int(parts[1])).first()
-    return None
+    # Apply migrations, with retry and FieldDoesNotExist handling
+    for attempt in range(2):
+        try:
+            call_command('migrate', label, database=db_alias, interactive=False, verbosity=1)
+            break
+        except LookupError as e:
+            logger.warning(f"Skipping migrate for '{label}' on '{db_alias}': {e}")
+            break
+        except models.ObjectDoesNotExist as e:
+            logger.error(f"FieldDoesNotExist during migrate for '{label}' on '{db_alias}': {e}")
+            break
+        except Exception as e:
+            logger.error(f"Error applying migrations for '{label}' on '{db_alias}' [attempt {attempt+1}]: {e}")
+            if attempt == 1:
+                break
+            # on first failure, retry after a short pause
+            time.sleep(1)
+
 
 @receiver(post_save)
 def sync_mediafile_on_save(sender, instance, **kwargs):
-    # Only care about dynamic-app models
-    label = getattr(sender._meta, "app_label", "")
-    if not label.startswith("project_"):
+    label = getattr(sender._meta, 'app_label', '')
+    if not label.startswith('project_'):
         return
-
-    project = get_project_from_app_label(label)
-
-    # Inspect all FileField/ImageField on this model
+    parts = label.split('_')
+    project = None
+    if len(parts) >= 2 and parts[1].isdigit():
+        from create_api.models import Project as _P
+        project = _P.objects.filter(id=int(parts[1])).first()
     for field in instance._meta.get_fields():
         if isinstance(field, models.FileField):
-            file_field = getattr(instance, field.name)
-            if file_field and hasattr(file_field, "name") and file_field.name:
-                path = file_field.name  # e.g. "profile_avatar/foo.png"
-                # Upsert the MediaFile row
+            val = getattr(instance, field.name)
+            if val and hasattr(val, 'name') and val.name:
                 MediaFile.objects.update_or_create(
-                    path=path,
-                    defaults={
-                        "file": path,
-                        "project": project,
-                    }
+                    path=val.name,
+                    defaults={'file': val.name, 'project': project}
                 )
+
 
 @receiver(pre_delete)
 def delete_mediafile_on_delete(sender, instance, **kwargs):
-    label = getattr(sender._meta, "app_label", "")
-    if not label.startswith("project_"):
+    label = getattr(sender._meta, 'app_label', '')
+    if not label.startswith('project_'):
         return
-
-    # If the instance had any files, remove their MediaFile rows
     for field in instance._meta.get_fields():
         if isinstance(field, models.FileField):
-            file_field = getattr(instance, field.name)
-            if file_field and file_field.name:
-                MediaFile.objects.filter(path=file_field.name).delete()
+            val = getattr(instance, field.name)
+            if val and val.name:
+                MediaFile.objects.filter(path=val.name).delete()
+
+
+@receiver(post_migrate)
+def load_projects_after_migrations(sender, **kwargs):
+    for proj in Project.objects.all():
+        logger.info(f"Loaded project: {proj.name}")

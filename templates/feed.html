@@ -1,0 +1,107 @@
+{% extends "base.html" %}
+{% load static %}
+
+{% block content %}
+<div id="gtco-main">
+  <div class="container">
+    {% if user.is_authenticated %}
+    <div class="row row-pb-md">
+      <div class="col-md-12">
+        <div class="analytics-section animate-box" data-animate-effect="fadeIn">
+          <h3>Comment Activity (Last 10 Days)</h3>
+          <div class="analytics-chart-container">
+            <canvas id="commentActivityChart"></canvas>
+          </div>
+        </div>
+      </div>
+    </div>
+    {% endif %}
+
+    <div class="row row-pb-md">
+      <div class="col-md-12">
+        <ul id="gtco-post-list">
+          {% if posts %}
+            {% for p in posts %}
+              <li class="one-third entry animate-box" data-animate-effect="fadeIn">
+                <a href="{% url 'detail' p.id %}">
+                  <div class="entry-img" style="background-image: url('{{p.image.url}}')"></div>
+                  <div class="entry-desc">
+                    <h3>{{p.title}}</h3>
+                    <p>{{p.description}}.</p>
+                  </div>
+                </a>
+                <a href="{% url 'detail' p.id %}" class="post-meta">{{p.user}} <span class="date-posted">{{p.created_at}}</span></a>
+              </li>
+            {% endfor %}
+          {% endif %}
+        </ul>
+      </div>
+    </div>
+  </div>
+</div>
+
+{% if user.is_authenticated %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+  const ctx = document.getElementById('commentActivityChart').getContext('2d');
+  new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: {{ analytics_data.labels|safe }},
+      datasets: [{
+        label: 'Comments on Your Posts',
+        data: {{ analytics_data.data|safe }},
+        borderColor: '#007bff',
+        backgroundColor: 'rgba(0, 123, 255, 0.1)',
+        borderWidth: 2,
+        tension: 0.4,
+        fill: true
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: {
+          position: 'top',
+        },
+        title: {
+          display: true,
+          text: 'Comment Activity Over Time'
+        }
+      },
+      scales: {
+        y: {
+          beginAtZero: true,
+          ticks: {
+            stepSize: 1
+          }
+        }
+      }
+    }
+  });
+});
+</script>
+<style>
+.analytics-section {
+  background: #fff;
+  padding: 2rem;
+  border-radius: 8px;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+  margin-bottom: 2rem;
+}
+
+.analytics-section h3 {
+  margin-bottom: 1.5rem;
+  color: #333;
+  font-size: 1.5rem;
+}
+
+.analytics-chart-container {
+  height: 400px;
+  position: relative;
+}
+</style>
+{% endif %}
+{% endblock %} 

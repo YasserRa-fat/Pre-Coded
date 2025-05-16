@@ -1,0 +1,116 @@
+{% extends "base.html" %}
+{% load static %}
+
+{% block content %}
+<body>
+  <div class="gtco-loader"></div>
+  
+  <div id="page">
+    <nav class="gtco-nav" role="navigation">
+      <div class="container">
+        <div class="row">
+          <div class="col-xs-2 text-left">
+            <div id="gtco-logo"><a href="index.html">Engineers<span>.</span></a></div>
+          </div>
+          <div class="col-xs-10 text-right menu-1">
+            <ul>
+              {% if request.user.is_authenticated %}
+                <li><a href="{% url 'logout' %}">Logout</a></li>
+                <li><a href="{% url 'home' %}">Profile</a></li>
+              {% else %}
+                <li><a href="{% url 'login' %}">Login</a></li>
+                <li><a href="{% url 'register' %}">Register</a></li>
+              {% endif %}
+            </ul>
+          </div>
+        </div>
+      </div>
+    </nav>
+
+    <header id="gtco-header" class="gtco-cover" role="banner" style="background-image: url({% static 'images/img_1.jpg' %})"
+      data-stellar-background-ratio="0.5">
+      <div class="overlay"></div>
+      <div class="container">
+        <div class="row">
+          <div class="col-md-7 text-left">
+            <div class="display-t">
+              <div class="display-tc animate-box" data-animate-effect="fadeInUp">
+                <span class="date-post">Feed</span>
+                <h1 class="mb30"><a href="#">Welcome {{request.user}}</a></h1>
+                {% if request.user.is_authenticated %}
+                  <p><a href="{% url 'post_create' %}" class="text-link">Create a Post</a></p>
+                {% else %}
+                  <p><a href="{% url 'register' %}" class="text-link">Register</a> or <a href="{% url 'login' %}" class="text-link">Login</a> to post</p>
+                {% endif %}
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <div id="gtco-main">
+      <div class="container">
+        {% if analytics_graph %}
+        <div class="row row-pb-md">
+          <div class="col-md-12">
+            <div class="analytics-graph animate-box" data-animate-effect="fadeIn">
+              <h3>Your Interaction Analytics</h3>
+              {{ analytics_graph|safe }}
+            </div>
+          </div>
+        </div>
+        {% endif %}
+
+        <div class="row row-pb-md">
+          <div class="col-md-12">
+            <ul id="gtco-post-list">
+              {% if posts %}
+                {% for p in posts %}
+                  <li class="one-third entry animate-box" data-animate-effect="fadeIn">
+                    <a href="{% url 'detail' p.id %}">
+                      <div class="entry-img" style="background-image: url('{{p.image.url}}')"></div>
+                      <div class="entry-desc">
+                        <h3>{{p.title}}</h3>
+                        <p>{{p.description}}.</p>
+                      </div>
+                    </a>
+                    <a href="{% url 'detail' p.id %}" class="post-meta">{{p.user}} <span class="date-posted">{{p.created_at}}</span></a>
+                  </li>
+                {% endfor %}
+              {% endif %}
+            </ul>
+          </div>
+        </div>
+
+        <div class="row">
+          <div class="col-md-12 text-center">
+            <nav aria-label="Page navigation">
+              <ul class="pagination">
+                <li>
+                  <a href="#" aria-label="Previous">
+                    <span aria-hidden="true">&laquo;</span>
+                  </a>
+                </li>
+                <li class="active"><a href="#">1</a></li>
+                <li><a href="#">2</a></li>
+                <li><a href="#">3</a></li>
+                <li><a href="#">4</a></li>
+                <li><a href="#">5</a></li>
+                <li>
+                  <a href="#" aria-label="Next">
+                    <span aria-hidden="true">&raquo;</span>
+                  </a>
+                </li>
+              </ul>
+            </nav>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <footer id="gtco-footer" role="contentinfo">
+    </footer>
+  </div>
+</body>
+{% endblock %} 

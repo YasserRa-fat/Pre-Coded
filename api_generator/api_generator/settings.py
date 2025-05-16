@@ -15,7 +15,13 @@ from pathlib import Path
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
-
+# put all dynamic previews in a sibling folder, not under BASE_DIR
+PREVIEW_ROOT = BASE_DIR.parent / "dynamic_previews"
+# ensure it exists at startup
+PREVIEW_ROOT.mkdir(exist_ok=True, parents=True)
+# Add DYNAMIC_PREVIEWS_DIR for the preview system
+DYNAMIC_PREVIEWS_DIR = BASE_DIR.parent / "dynamic_previews" / "dynamic_apps_preview"
+DYNAMIC_PREVIEWS_DIR.mkdir(exist_ok=True, parents=True)
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.1/howto/deployment/checklist/
@@ -26,12 +32,14 @@ SECRET_KEY = 'django-insecure-8nnd!w13nd3p9vo^7oa=&i6=4dz55chk2&78_c6*0p1je39mt!
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = ['*']
 
 
 # Application definition
 
 INSTALLED_APPS = [
+     "channels",
+     'django_extensions',
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
@@ -42,11 +50,16 @@ INSTALLED_APPS = [
         'rest_framework_simplejwt',
     'core.apps.CoreConfig',
     'projects.apps.ProjectsConfig',
+# 'django.contrib.staticfiles',
 
     'corsheaders',  
-    'create_api',
+    'create_api.apps.CreateApiConfig',
 ]
 
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:3000",
+]
+CORS_ALLOW_CREDENTIALS = True
 import sys
 from pathlib import Path
 DYNAMIC_APPS_PATH = Path(__file__).resolve().parent.parent / "dynamic_apps"
@@ -69,32 +82,43 @@ AUTHENTICATION_BACKENDS = [
 ]
 
 MIDDLEWARE = [
-    # 1) detect project-alias first
+    # 1) CORS first so the browser will accept and send cookies
+    "corsheaders.middleware.CorsMiddleware",
 
-    'core.middleware.ProjectDBMiddleware',
+    # 2) Common (for things like APPEND_SLASH)…
+    "django.middleware.common.CommonMiddleware",
 
-    # 2) patch register/login to write into the project DB and record alias
-    'core.middleware.PatchRegisterAndLoginMiddleware',
+    # 3) Session must come before CSRF/Auth
+    "django.contrib.sessions.middleware.SessionMiddleware",
 
-    # 3) Django’s built-in session & auth middlewares
-    'django.contrib.sessions.middleware.SessionMiddleware',
-    
-    'django.contrib.auth.middleware.AuthenticationMiddleware',
-        'corsheaders.middleware.CorsMiddleware',
+    # 4) CSRF checks before you populate request.user
+    "django.middleware.csrf.CsrfViewMiddleware",
 
-    # 4) now re-hydrate request.user from project DB
-    
-    'core.middleware.ProjectSessionAuthMiddleware',
+    # 5) Django's auth middleware to read the session cookie into request.user
+    "django.contrib.auth.middleware.AuthenticationMiddleware",
 
-    # your other middleware…
-    'django.middleware.common.CommonMiddleware',
-    'django.middleware.csrf.CsrfViewMiddleware',
-    'django.contrib.messages.middleware.MessageMiddleware',
-    # … etc.
+    # 6) Your project-DB routing + login patching
+    "core.middleware.ProjectDBMiddleware",
+    "core.middleware.PatchRegisterAndLoginMiddleware",
+    "core.middleware.PreviewDiffMiddleware",
+
+    # 7) Now swap in the per-project DB user (but don't re-login)
+    "core.middleware.ProjectSessionAuthMiddleware",
+
+    # 8) Messaging, etc.
+    "django.contrib.messages.middleware.MessageMiddleware",
 ]
+
 
 ROOT_URLCONF = 'api_generator.urls'
 
+CSP_SCRIPT_SRC = (
+    "'self'",
+    "'unsafe-inline'",    # you may already have this
+    "'unsafe-eval'",      # ← allow eval() inside those bundles
+    "https://code.jquery.com",
+    "https://cdn.jsdelivr.net",
+)
 TEMPLATES = [
     {
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
@@ -118,7 +142,17 @@ TEMPLATES = [
 ]
 
 WSGI_APPLICATION = 'api_generator.wsgi.application'
+# Tell Django to use Channels' ASGI app
+ASGI_APPLICATION = "api_generator.asgi.application"
 
+CHANNEL_LAYERS = {
+    "default": {
+        "BACKEND": "channels.layers.InMemoryChannelLayer",
+        "CONFIG": {
+            "capacity": 1500,
+        },
+    },
+}
 
 # Database
 # https://docs.djangoproject.com/en/5.1/ref/settings/#databases

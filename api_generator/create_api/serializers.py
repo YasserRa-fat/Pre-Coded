@@ -158,6 +158,7 @@ class SettingsFileSerializer(serializers.ModelSerializer):
 
 
 class ProjectFileSerializer(serializers.ModelSerializer):
+    
     class Meta:
         model = ProjectFile
         fields = ['id', 'name', 'path', 'content', 'created_at','project']

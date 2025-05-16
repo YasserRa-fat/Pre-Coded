@@ -294,7 +294,8 @@ from gpt4all import GPT4All
 # model = GPT4All(model_name="ggml-gpt4all-j-v1.3-groovy.bin", model_path=MODEL_PATH, allow_download=False)
 
 
-def generate_ai_summary(model_name, fields, relationships):
+
+def generate_ai_summary(model_name, fields, relationships, retries=3, backoff=1.0):
     prompt = f"""
 The Django model '{model_name}' has fields: {', '.join(field['name'] for field in fields)}.
 It has relationships: {', '.join(f"{rel['type']} -> {rel['target']}" for rel in relationships)}.
@@ -309,21 +310,31 @@ Provide a human-readable summary with at most 40 words of this model's purpose, 
         "max_tokens": 50
     }
     headers = {"Authorization": f"Bearer {API_KEY}"}
-    try:
-        response = requests.post(url, json=payload, headers=headers)
-        response.raise_for_status()
-        result = response.json()
-        print("generate_ai_summary response:", result)
-        # First, try to get choices from a top-level "choices" key.
-        choices = result.get("choices")
-        if choices and isinstance(choices, list) and len(choices) > 0:
-            if isinstance(choices[0], dict) and "text" in choices[0]:
-                return choices[0]["text"].strip().split("\n")[0]
-            elif isinstance(choices[0], str):
-                return choices[0].strip().split("\n")[0]
-        return "Error: Unexpected API response format."
-    except requests.exceptions.RequestException as e:
-        return f"Error generating AI summary: {str(e)}"
+
+    for attempt in range(retries):
+        try:
+            response = requests.post(url, json=payload, headers=headers)
+            if response.status_code == 429:
+                logger.warning(f"Rate limited. Retry {attempt + 1}/{retries} after {backoff} seconds.")
+                time.sleep(backoff)
+                backoff *= 2  # exponential backoff
+                continue
+            response.raise_for_status()
+            result = response.json()
+            logger.debug("generate_ai_summary response: %s", result)
+            choices = result.get("choices")
+            if choices and isinstance(choices, list) and len(choices) > 0:
+                if isinstance(choices[0], dict) and "text" in choices[0]:
+                    return choices[0]["text"].strip().split("\n")[0]
+                elif isinstance(choices[0], str):
+                    return choices[0].strip().split("\n")[0]
+            return "Error: Unexpected API response format."
+        except requests.exceptions.RequestException as e:
+            logger.error(f"RequestException on attempt {attempt + 1}: {str(e)}")
+            time.sleep(backoff)
+            backoff *= 2
+
+    return f"Error generating AI summary for model '{model_name}' after {retries} attempts."
 
 
 def generate_view_ai_summary(view_name, view_type, model_reference):
@@ -681,3 +692,74 @@ Example format:
     except requests.exceptions.RequestException as e:
         return [f"Error generating AI summary: {str(e)}"] * len(forms_data) 
     
+from unidiff import PatchSet,UnidiffParseError
+import logging
+import difflib
+
+
+
+logger = logging.getLogger(__name__)
+def apply_unified_diff(original_lines: list, diff: str) -> list:
+    try:
+        result_lines = original_lines.copy()
+        hunks = re.split(r'^@@', diff, flags=re.MULTILINE)[1:]  # Skip diff header
+        current_line = 0
+
+        for hunk in hunks:
+            # Parse hunk header (e.g., "-1,10 +1,15")
+            header_match = re.match(r' -(\d+),(\d+) \+(\d+),(\d+) @@', '@@' + hunk.split('\n', 1)[0])
+            if not header_match:
+                logger.error(f"Invalid hunk header: {hunk[:100]}")
+                return original_lines
+
+            old_start, old_count, new_start, new_count = map(int, header_match.groups())
+            if old_start < 1 or old_start + old_count - 1 > len(original_lines):
+                logger.error(f"Hunk range out of bounds: old_start={old_start}, old_count={old_count}, file_lines={len(original_lines)}")
+                return original_lines
+
+            # Extract hunk lines
+            hunk_lines = ('@@' + hunk).split('\n')[1:]
+            new_lines = []
+            expected_lines = []
+            hunk_line_idx = 0
+            i = old_start - 1
+
+            # Process hunk lines
+            while hunk_line_idx < len(hunk_lines) and i < len(original_lines):
+                line = hunk_lines[hunk_line_idx]
+                if line.startswith('-'):
+                    if i >= len(original_lines) or original_lines[i] != line[1:]:
+                        logger.error(f"Hunk line mismatch at line {i+1}: expected={line[1:][:50]}, got={original_lines[i][:50] if i < len(original_lines) else 'EOF'}")
+                        return original_lines
+                    expected_lines.append(original_lines[i])
+                    i += 1
+                    hunk_line_idx += 1
+                elif line.startswith('+'):
+                    new_lines.append(line[1:])
+                    hunk_line_idx += 1
+                elif line.startswith(' '):
+                    if i >= len(original_lines) or original_lines[i] != line[1:]:
+                        logger.error(f"Context line mismatch at line {i+1}: expected={line[1:][:50]}, got={original_lines[i][:50] if i < len(original_lines) else 'EOF'}")
+                        return original_lines
+                    new_lines.append(line[1:])
+                    expected_lines.append(line[1:])
+                    i += 1
+                    hunk_line_idx += 1
+                else:
+                    logger.error(f"Invalid hunk line: {line[:100]}")
+                    return original_lines
+
+            if i != old_start + old_count - 1:
+                logger.error(f"Hunk is longer than expected: processed {i - (old_start - 1)} lines, expected {old_count}")
+                return original_lines
+
+            # Apply changes
+            result_lines = result_lines[:old_start - 1] + new_lines + result_lines[old_start + old_count - 1:]
+            current_line = old_start + old_count - 1
+
+        logger.debug(f"Applied diff successfully, result_lines={len(result_lines)}")
+        return result_lines
+
+    except Exception as e:
+        logger.exception(f"Failed to apply unified diff: {e}")
+        return original_lines

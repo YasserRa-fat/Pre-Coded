@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Diff Modal</title>
+  <script src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7.22.9/babel.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/react-diff-viewer@3.1.1/dist/index.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useEffect } = React;
+
+    // AI response (afterMap) from your logs
+    const afterMap = {
+      'templates/feed.html': `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Topic Listing</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/mdb-ui-kit/6.4.0/mdb.min.css" />
+    <link rel="stylesheet" href="{% static 'css/styles.css' %}">
+</head>
+<body>
+    <!-- Navbar -->
+    <nav class="navbar navbar-expand-lg navbar-light bg-light">
+        <div class="container-fluid">
+            <a class="navbar-brand" href="#">Topic Listing</a>
+            <button class="navbar-toggler" type="button" data-mdb-toggle="collapse" data-mdb-target="#navbarNav">
+                <span class="navbar-toggler-icon"></span>
+            </button>
+            <div class="collapse navbar-collapse" id="navbarNav">
+                <ul class="navbar-nav ms-auto">
+                    <li class="nav-item"><a class="nav-link active" href="#">Home</a></li>
+                    <li class="nav-item"><a class="nav-link" href="#">Topics</a></li>
+                    <li class="nav-item"><a class="nav-link" href="#">Profile</a></li>
+                    <li class="nav-item"><a class="nav-link" href="#">Login</a></li>
+                </ul>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Main Content -->
+    <div class="container my-5">
+        <div class="row">
+            <!-- Sidebar -->
+            <div class="col-lg-3">
+                <div class="card mb-4">
+                    <div class="card-body">
+                        <h5 class="card-title">Categories</h5>
+                        <ul class="list-group">
+                            <li class="list-group-item"><a href="#">Technology</a></li>
+                            <li class="list-group-item"><a href="#">Lifestyle</a></li>
+                            <li class="list-group-item"><a href="#">Education</a></li>
+                            <li class="list-group-item"><a href="#">Health</a></li>
+                        </ul>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-body">
+                        <h5 class="card-title">Trending Topics</h5>
+                        <ul class="list-group">
+                            <li class="list-group-item"><a href="#">AI Innovations</a></li>
+                            <li class="list-group-item"><a href="#">Sustainable Living</a></li>
+                            <li class="list-group-item"><a href="#">Remote Work</a></li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Feed -->
+            <div class="col-lg-9">
+                <div class="card mb-4">
+                    <div class="card-body">
+                        <h5 class="card-title">Latest Topics</h5>
+                        <div class="row">
+                            <div class="col-md-6 mb-4">
+                                <div class="card">
+                                    <img src="https://via.placeholder.com/300x200" class="card-img-top" alt="Topic">
+                                    <div class="card-body">
+                                        <h6 class="card-title">Tech Breakthrough</h6>
+                                        <p class="card-text">Discover the latest advancements in AI and machine learning.</p>
+                                        <a href="#" class="btn btn-primary">Read More</a>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="col-md-6 mb-4">
+                                <div class="card">
+                                    <img src="https://via.placeholder.com/300x200" class="card-img-top" alt="Topic">
+                                    <div class="card-body">
+                                        <h6 class="card-title">Healthy Living</h6>
+                                        <p class="card-text">Tips for maintaining a balanced lifestyle.</p>
+                                        <a href="#" class="btn btn-primary">Read More</a>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Footer -->
+    <footer class="bg-light text-center py-4">
+        <p>&copy; 2025 Topic Listing. All rights reserved.</p>
+    </footer>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/mdb-ui-kit/6.4.0/mdb.min.js"></script>
+    <script src="{% static 'js/scripts.js' %}"></script>
+</body>
+</html>
+      `.trim(),
+      'static/css/styles.css': `
+body {
+    font-family: 'Roboto', sans-serif;
+    background-color: #f8f9fa;
+}
+
+.navbar {
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.card {
+    transition: transform 0.3s;
+}
+
+.card:hover {
+    transform: translateY(-5px);
+}
+
+.list-group-item a {
+    color: #007bff;
+    text-decoration: none;
+}
+
+.list-group-item a:hover {
+    color: #0056b3;
+}
+
+.btn-primary {
+    background-color: #007bff;
+    border: none;
+}
+
+.btn-primary:hover {
+    background-color: #0056b3;
+}
+      `.trim(),
+      'static/js/scripts.js': `
+document.addEventListener('DOMContentLoaded', () => {
+    const cards = document.querySelectorAll('.card');
+    cards.forEach(card => {
+        card.addEventListener('click', () => {
+            card.classList.toggle('shadow-lg');
+        });
+    });
+
+    const navLinks = document.querySelectorAll('.nav-link');
+    navLinks.forEach(link => {
+        link.addEventListener('click', (e) => {
+            e.preventDefault();
+            alert('Navigating to ' + link.textContent);
+        });
+    });
+});
+      `.trim()
+    };
+
+    const files = ['templates/feed.html', 'static/css/styles.css', 'static/js/scripts.js'];
+    const JWT_TOKEN = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0b2tlbl90eXBlIjoiYWNjZXNzIiwiZXhwIjoxNzQ2OTg1MTE0LCJpYXQiOjE3NDY5ODE1MTQsImp0aSI6Ijc0ZjUxNTlmMjQ1ODQxNTZiYjNjMzkzZGNhODdkMzVmIiwidXNlcl9pZCI6MX0.kOZDgBpv28KBCSAPnElKm5joGoYTkdBqFGo9pFdxOo0';
+    const BASE_URL = 'http://127.0.0.1:8001/api/projects/1/preview/one/91/';
+
+    // DiffModal Component
+    function DiffModal({ beforeMap, afterMap, files, onClose }) {
+      const [activeFile, setActiveFile] = useState(files[0]);
+
+      return (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg w-11/12 max-w-4xl p-6 max-h-[80vh] overflow-auto">
+            <div className="flex justify-between items-center mb-4">
+              <h2 className="text-2xl font-bold">File Differences</h2>
+              <button
+                onClick={onClose}
+                className="text-gray-500 hover:text-gray-700"
+              >
+                ✕
+              </button>
+            </div>
+            {/* File Tabs */}
+            <div className="flex border-b mb-4">
+              {files.map(file => (
+                <button
+                  key={file}
+                  className={`px-4 py-2 ${
+                    activeFile === file
+                      ? 'border-b-2 border-blue-500 text-blue-500'
+                      : 'text-gray-600'
+                  }`}
+                  onClick={() => setActiveFile(file)}
+                >
+                  {file.split('/').pop()}
+                </button>
+              ))}
+            </div>
+            {/* Diff Viewer */}
+            <div className="bg-gray-100 p-4 rounded">
+              <ReactDiffViewer
+                oldValue={beforeMap[activeFile] || ''}
+                newValue={afterMap[activeFile] || ''}
+                splitView={true}
+                showDiffOnly={true}
+                styles={{
+                  diffContainer: { fontSize: '14px' },
+                  line: { wordBreak: 'break-all' }
+                }}
+              />
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // Main App Component
+    function App() {
+      const [beforeMap, setBeforeMap] = useState({});
+      const [isModalOpen, setIsModalOpen] = useState(true);
+      const [error, setError] = useState(null);
+
+      // Fetch before content from preview endpoints on mount
+      useEffect(() => {
+        async function fetchBeforeContent() {
+          const newBeforeMap = {};
+          for (const file of files) {
+            try {
+              const beforeUrl = `${BASE_URL}?mode=before&file=${encodeURIComponent(file)}`;
+              const response = await fetch(beforeUrl, {
+                headers: {
+                  'Authorization': `Bearer ${JWT_TOKEN}`,
+                  'Content-Type': 'text/plain'
+                }
+              });
+              if (!response.ok) {
+                throw new Error(`HTTP ${response.status} for ${file}`);
+              }
+              const text = await response.text();
+              newBeforeMap[file] = text;
+            } catch (err) {
+              console.error(`Error fetching before content for ${file}:`, err);
+              newBeforeMap[file] = '';
+              setError(`Failed to fetch before content for ${file}: ${err.message}`);
+            }
+          }
+          setBeforeMap(newBeforeMap);
+        }
+        fetchBeforeContent();
+      }, []);
+
+      return (
+        <div className="min-h-screen bg-gray-100 p-6">
+          <h1 className="text-3xl font-bold mb-6 text-center">Preview Diff Modal</h1>
+          {error && (
+            <div className="bg-red-100 text-red-700 p-4 rounded mb-4">
+              {error}
+            </div>
+          )}
+          {isModalOpen && (
+            <DiffModal
+              beforeMap={beforeMap}
+              afterMap={afterMap}
+              files={files}
+              onClose={() => setIsModalOpen(false)}
+            />
+          )}
+          <button
+            onClick={() => setIsModalOpen(true)}
+            className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600"
+          >
+            Open Diff Modal
+          </button>
+        </div>
+      );
+    }
+
+    // Render the app
+    ReactDOM.render(<App />, document.getElementById('root'));
+  </script>
+</body>
+</html>

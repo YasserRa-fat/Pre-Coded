@@ -1,11 +1,16 @@
-// src/components/ProjectDetail.js
-import React, { useEffect, useState } from 'react';
+import React, { useContext, useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
+import api from '../api';
+import { AuthContext } from '../AuthContext';
+import DiffModal from '../components/DiffModal';
+import FloatingChat from '../floating-bot/FloatingChat';
+
 import './css/ProjectDetail.css';
 
-const ProjectDetail = () => {
+export default function ProjectDetail() {
   const { projectId } = useParams();
   const navigate = useNavigate();
+  const { token } = useContext(AuthContext);
 
   const [project, setProject] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -14,252 +19,220 @@ const ProjectDetail = () => {
   const [showCreateAppModal, setShowCreateAppModal] = useState(false);
   const [newAppName, setNewAppName] = useState('');
   const [newAppDescription, setNewAppDescription] = useState('');
+
+  const [aiDiffFiles, setAiDiffFiles] = useState([]);
+  const [previewMap, setPreviewMap] = useState({});
+  const [modalOpen, setModalOpen] = useState(false);
+  const [changeId, setChangeId] = useState(null);
   const [running, setRunning] = useState(false);
 
+  // Fetch project on mount
   useEffect(() => {
     if (!projectId) return;
-
-    const token = localStorage.getItem('access_token');
-    fetch(`/api/projects/${projectId}/`, {
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${token}`,
-      },
-    })
-      .then(res => {
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        return res.json();
-      })
-      .then(data => {
-        setProject(data);
-        setLoading(false);
-      })
-      .catch(err => {
-        setError(err.message);
-        setLoading(false);
-      });
+    api
+      .get(`/projects/${projectId}/`)
+      .then(({ data }) => setProject(data))
+      .catch(err => setError(err.message))
+      .finally(() => setLoading(false));
   }, [projectId]);
 
-  const handleCreateApp = () => {
-    if (!newAppName.trim()) {
-      alert("Please enter an app name.");
-      return;
-    }
+  // Handle AI diff payload
+  const handleDiff = ({ files, previewMap, change_id, beforeMap, afterMap }) => {
+    const formatted = Array.isArray(files)
+      ? files
+          .filter(path => typeof path === 'string')
+          .map(path => ({
+            filePath: path.replace(/^templates\//, ''),
+            fullPath: path,
+            before: beforeMap?.[path] || '',
+            after: afterMap?.[path] || beforeMap?.[path] || '',
+            projectId,
+            changeId: change_id,
+          }))
+      : [];
 
-    const token = localStorage.getItem('access_token');
-    fetch('/api/apps/', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${token}`,
-      },
-      body: JSON.stringify({
+    if (!formatted.length) return;
+    setAiDiffFiles(formatted);
+    setPreviewMap(previewMap || {});
+    setChangeId(change_id);
+    setModalOpen(true);
+  };
+
+  const applyChanges = () =>
+    api
+      .post(`/projects/${projectId}/apply/${changeId}/`)
+      .then(() => {
+        setModalOpen(false);
+        setAiDiffFiles([]);
+        alert('✅ Changes applied');
+      })
+      .catch(err => alert(`Error: ${err.message}`));
+
+  const discardChanges = () =>
+    api
+      .post(`/ai/conversations/${changeId}/cancel/`)
+      .then(() => setModalOpen(false))
+      .catch(err => alert(`Error: ${err.message}`));
+
+  const handleCreateApp = () => {
+    if (!newAppName.trim()) return alert('Enter an app name');
+    api
+      .post('/apps/', {
         project: project.id,
         name: newAppName,
         description: newAppDescription,
-      }),
-    })
-      .then(res => {
-        if (!res.ok) {
-          return res.json().then(errData =>
-            Promise.reject(new Error(`HTTP ${res.status}: ${JSON.stringify(errData)}`))
-          );
-        }
-        return res.json();
       })
-      .then(newApp => {
-        setShowCreateAppModal(false);
-        setNewAppName('');
-        setNewAppDescription('');
-        navigate(`/projects/${project.id}/apps/${newApp.id}`);
-      })
-      .catch(err => {
-        alert(`Error creating app: ${err.message}`);
-      });
+      .then(({ data }) => navigate(`/projects/${project.id}/apps/${data.id}`))
+      .catch(err => alert(`Error: ${JSON.stringify(err.response?.data || err)}`));
   };
-  const renderFileCards = (files, routePrefix, fixedName = null, appId = null) => {
-    if (!Array.isArray(files)) return null;
-  
-    return files.map(f => (
+
+  const handleRunProject = () => {
+    setRunning(true);
+    api
+      .post(`/projects/${projectId}/run/`)
+      .then(({ data }) => data.url && window.open(data.url, '_blank'))
+      .catch(err => setError(err.message))
+      .finally(() => setRunning(false));
+  };
+
+  if (loading) return <p className="status">Loading project…</p>;
+  if (error) return <p className="status status--error">Error: {error}</p>;
+  if (!project) return <p className="status status--error">Project not found</p>;
+
+  const renderFileCards = (list, route, label, appId) =>
+    list.map(f => (
       <div
         key={f.id}
         className="file-card"
         onClick={e => {
           e.stopPropagation();
           const base = appId
-            ? `/projects/${projectId}/apps/${appId}/${routePrefix}`
-            : `/projects/${projectId}/${routePrefix}`;
-          navigate(`${base}/${f.id}`);  // Ensure it's navigating to the correct route
+            ? `/projects/${projectId}/apps/${appId}/${route}`
+            : `/projects/${projectId}/${route}`;
+          navigate(`${base}/${f.id}`);
         }}
       >
-        <h6>{fixedName || f.name || f.path}</h6>
+        <h6 className="file-card__title">{label || f.name || f.path}</h6>
       </div>
     ));
-  };
-  
-
-/**
-+   * Call the backend to “run” this project,
-+   * then open the returned URL in a new tab.
-+   */
-const handleRunProject = async () => {
-      setRunning(true);
-      setError(null);
-  
-      try {
-        const token = localStorage.getItem('access_token');
-        const res = await fetch(`/api/projects/${projectId}/run/`, {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${token}`,
-          },
-        });
-  
-        if (!res.ok) {
-          const errJson = await res.json().catch(() => ({}));
-          throw new Error(errJson.detail || `HTTP ${res.status}`);
-        }
-  
-        const { url } = await res.json();
-        if (!url) throw new Error('No URL returned from server.');
-  
-        // open the running project in a new tab/window
-        window.open(url, '_blank');
-      } catch (err) {
-        setError(`Failed to run project: ${err.message}`);
-      } finally {
-        setRunning(false);
-      }
-    };
-
-
-
-
-  if (loading) return <p className="loading">Loading project details…</p>;
-  if (error)   return <p className="error">Error: {error}</p>;
-  if (!project) return <p className="error">No project found.</p>;
-
-  // Project‑level groupings
-  const projectUrlFiles = (project.url_files || []).filter(f => f.app === null);
-  const settingsFiles   = project.settings_files || [];
-  const projectFiles    = project.project_files || [];
-  const staticFiles     = project.static_files  || [];
-  const mediaFiles      = project.media_files   || [];
-
-  const displayVisibility = project.visibility
-    ? project.visibility[0].toUpperCase() + project.visibility.slice(1)
-    : 'N/A';
 
   return (
-    <div className="project-detail-container">
-       <div className="project-header">
+    <main className="project-detail">
+      <header className="project-detail__header">
+        <h1 className="project-detail__title">{project.name}</h1>
+        <button
+          className="btn btn--primary"
+          onClick={handleRunProject}
+          disabled={running}
+        >
+          {running ? 'Launching…' : 'Run Project'}
+        </button>
+      </header>
 
-      <h2>{project.name}</h2>
+      {modalOpen && aiDiffFiles.length > 0 && (
+        <DiffModal
+          projectId={projectId}
+          changeId={changeId}
+          files={aiDiffFiles}
+          previewMap={previewMap}
+          token={token}
+          onApply={applyChanges}
+          onCancel={discardChanges}
+          onClose={() => setModalOpen(false)}
+        />
+      )}
 
+      <FloatingChat onDiff={handleDiff} projectId={projectId} />
 
-      +       <button
-         className="run-project-btn"
-         onClick={handleRunProject}
-         disabled={running}
-       >
-         {running ? 'Launching…' : 'Run Project'}
-       </button>
-     </div>
-      <p>
-        <strong>Visibility:</strong> {displayVisibility}
-      </p>
+      <section className="project-detail__section project-detail__section--files">
+        <h2 className="section-title">Project Files</h2>
+        <div className="file-grid">
+          {renderFileCards(project.settings_files, 'settings-files')}
+          {renderFileCards(
+            project.url_files.filter(f => f.app === null),
+            'url-files'
+          )}
+          {renderFileCards(project.project_files, 'project-files')}
 
-      <div className="cards-container">
-        {/* Project‑level files */}
-        <div className="project-card">
-          <h3>Project Files</h3>
-          {renderFileCards(settingsFiles,    'settings-files')}
-          {renderFileCards(projectUrlFiles,  'url-files')}
-          {renderFileCards(projectFiles,     'project-files')}
-
-
-          <div className="file-nav-buttons">
+          <nav className="file-nav">
             <button onClick={() => navigate(`/projects/${projectId}/template-files`)}>
-              Manage Templates
+              Templates
             </button>
             <button onClick={() => navigate(`/projects/${projectId}/static-files`)}>
-              Manage Static
+              Static
             </button>
             <button onClick={() => navigate(`/projects/${projectId}/media-files`)}>
-              Manage Media
+              Media
             </button>
-          </div>
+          </nav>
         </div>
+      </section>
 
-        {/* Apps Section */}
-        <div className="apps-card">
-          <h3>Apps</h3>
-          {project.apps?.length > 0 ? (
-            <div className="apps-container">
-              {project.apps.map(app => (
-                <div
-                  key={app.id}
-                  className="app-card"
-                  
-                >
-                  <h4>{app.name}</h4>
-                  {renderFileCards(app.model_files,    'model-files',    'models.py', app.id)}
-                  {renderFileCards(app.view_files,     'view-files',     'views.py',  app.id)}
-                  {renderFileCards(app.form_files,     'form-files',     'forms.py',  app.id)}
-                  {renderFileCards(app.app_url_files,  'url-files',      'urls.py',   app.id)}
-                  {renderFileCards(app.template_files, 'template-files', null,       app.id)}
-                  {renderFileCards(app.app_files,      'app-files',      null,       app.id)}
-                  <div className="file-nav-buttons">
-      <button onClick={() => navigate(`/projects/${projectId}/apps/${app.id}/template-files`)}>
-        Manage Templates
-      </button>
-    </div>
+      <section className="project-detail__section project-detail__section--apps">
+        <h2 className="section-title">Apps</h2>
+        <div className="apps-grid">
+          {project.apps.length ? (
+            project.apps.map(app => (
+              <div key={app.id} className="app-card">
+                <h3 className="app-card__title">{app.name}</h3>
+                <div className="app-file-grid">
+                  {renderFileCards(app.model_files, 'model-files', 'models.py', app.id)}
+                  {renderFileCards(app.view_files, 'view-files', 'views.py', app.id)}
+                  {renderFileCards(app.form_files, 'form-files', 'forms.py', app.id)}
+                  {renderFileCards(app.app_url_files, 'url-files', 'urls.py', app.id)}
+                  {renderFileCards(app.template_files, 'template-files', null, app.id)}
+                  {renderFileCards(app.app_files, 'app-files', null, app.id)}
                 </div>
-                
-              ))}
-              
-            </div>
+                <button
+                  className="btn btn--secondary app-card__manage-btn"
+                  onClick={() =>
+                    navigate(`/projects/${projectId}/apps/${app.id}/template-files`)
+                  }
+                >
+                  Manage Templates
+                </button>
+              </div>
+            ))
           ) : (
-            <p>No apps found for this project.</p>
+            <p>No apps yet.</p>
           )}
 
           <div
-            className="create-app-card"
+            className="app-card app-card--create"
             onClick={() => setShowCreateAppModal(true)}
           >
-            <h4>+</h4>
-            <p>Create a new app</p>
+            <div className="app-card--create-inner">
+              <span className="app-card--create-icon">＋</span>
+              <p>Create New App</p>
+            </div>
           </div>
         </div>
-      </div>
+      </section>
 
-      {/* Create App Modal */}
       {showCreateAppModal && (
         <div className="modal-overlay" onClick={() => setShowCreateAppModal(false)}>
-          <div className="modal-content" onClick={e => e.stopPropagation()}>
-            <h3>Create New App for {project.name}</h3>
+          <div className="modal" onClick={e => e.stopPropagation()}>
+            <h2>Create New App</h2>
             <input
               type="text"
               placeholder="App Name"
               value={newAppName}
               onChange={e => setNewAppName(e.target.value)}
+              className="modal__input"
             />
             <textarea
-              placeholder="App Description (optional)"
+              placeholder="Description (optional)"
               value={newAppDescription}
               onChange={e => setNewAppDescription(e.target.value)}
+              className="modal__textarea"
             />
-            <div className="modal-actions">
-              <button className="primary-btn" onClick={handleCreateApp}>
-                Create App
+            <div className="modal__actions">
+              <button className="btn btn--primary" onClick={handleCreateApp}>
+                Create
               </button>
               <button
-                className="secondary-btn"
-                onClick={() => {
-                  setShowCreateAppModal(false);
-                  setNewAppName('');
-                  setNewAppDescription('');
-                }}
+                className="btn btn--secondary"
+                onClick={() => setShowCreateAppModal(false)}
               >
                 Cancel
               </button>
@@ -267,8 +240,6 @@ const handleRunProject = async () => {
           </div>
         </div>
       )}
-    </div>
+    </main>
   );
-};
-
-export default ProjectDetail;
+}

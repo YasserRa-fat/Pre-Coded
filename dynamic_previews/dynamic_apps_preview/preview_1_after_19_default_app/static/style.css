@@ -1,0 +1,88 @@
+Here is a simple example of a CSS file that you can use for your Django project:
+
+```
+/* General styles */
+body {
+  font-family: Arial, sans-serif;
+  font-size: 16px;
+  line-height: 1.5;
+  color: #333;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  margin-top: 0;
+  margin-bottom: 10px;
+}
+
+p {
+  margin-bottom: 20px;
+}
+
+a {
+  color: #007bff;
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+/* Header styles */
+header {
+  background-color: #333;
+  color: #fff;
+  padding: 20px;
+}
+
+header h1 {
+  margin: 0;
+}
+
+/* Main content styles */
+main {
+  padding: 20px;
+}
+
+/* Footer styles */
+footer {
+  background-color: #333;
+  color: #fff;
+  padding: 20px;
+  text-align: center;
+}
+
+footer a {
+  color: #fff;
+}
+
+footer a:hover {
+  color: #ccc;
+}
+```
+
+This is just a basic example, and you can customize it to fit the needs of your project. To use this file in your Django project, you will need to save it as `style.css` in the `static/css` directory of your project. Then, you can include it in your templates using the `{% load static %}` and `{% static 'css/style.css' %}` template tags. For example:
+
+```
+<!DOCTYPE html>
+<html>
+<head>
+  <title>{% block title %}My Django Project{% endblock %}</title>
+  {% load static %}
+  <link rel="stylesheet" type="text/css" href="{% static 'css/style.css' %}">
+</head>
+<body>
+  <header>
+    <h1>{% block header %}My Django Project{% endblock %}</h1>
+  </header>
+  <main>
+    {% block content %}
+    {% endblock %}
+  </main>
+  <footer>
+    <p>&copy; {% now "Y" %} My Django Project</p>
+  </footer>
+</body>
+</html>
+```
+
+I hope this helps! Let me know if you have any questions.

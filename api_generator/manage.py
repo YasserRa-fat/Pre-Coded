@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 import os
 import sys
-
+# manage.py
 # 1) point at your settings
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "api_generator.settings")
 sys.path.insert(0, os.path.dirname(__file__))
@@ -40,12 +40,12 @@ if cmd not in ("makemigrations", "migrate"):
 
     # 4.4) Register apps stored in the DB (so INSTALLED_APPS now includes project_<id>_X)
     from core.startup import dynamic_register_apps
-    print("🔧 Registering dynamic apps from DB…")
+    # print("🔧 Registering dynamic apps from DB…")
     dynamic_register_apps()
 
     # 4.5) Dump those apps to disk & re‐register as filesystem apps
     from core.startup import dynamic_register_and_dump
-    print("💾 Dumping dynamic apps to disk…")
+    # print("💾 Dumping dynamic apps to disk…")
     dynamic_register_and_dump()
 
     # 4.6) Tell Django where each dynamic app’s migrations live
@@ -62,14 +62,14 @@ if cmd not in ("makemigrations", "migrate"):
 
     # 4.8) Finally, auto‐generate & apply migrations per project DB
     from core.migration import auto_apply_migrations
-    print("🛠 Ensuring all dynamic-project migrations are applied…")
+    # print("🛠 Ensuring all dynamic-project migrations are applied…")
     auto_apply_migrations()
 
 # 5) Hand off to Django’s CLI
 from django.conf import settings
-print("=== INSTALLED_APPS ===")
-for app in settings.INSTALLED_APPS:
-    print(" ", app)
-    print("=== MIGRATION_MODULES ===", getattr(settings, "MIGRATION_MODULES", {}))
+# print("=== INSTALLED_APPS ===")
+# for app in settings.INSTALLED_APPS:
+    # print(" ", app)
+    # print("=== MIGRATION_MODULES ===", getattr(settings, "MIGRATION_MODULES", {}))
 from django.core.management import execute_from_command_line
 execute_from_command_line(sys.argv)

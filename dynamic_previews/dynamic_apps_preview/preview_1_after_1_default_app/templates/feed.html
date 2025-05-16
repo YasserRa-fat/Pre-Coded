@@ -1,0 +1,100 @@
+{% extends 'base.html' %}
+{% load static %}
+{% block content %}
+<div class="container">
+  <div class="row">
+    <div class="col-md-8">
+      {% for post in posts %}
+        <!-- Post -->
+        <div class="post">
+          <!-- Post Image -->
+          {% if post.image %}
+            <div class="post-img">
+              <img src="{{ post.image.url }}" alt="">
+            </div>
+          {% endif %}
+          <!-- Post Content -->
+          <div class="post-content">
+            <!-- Post Author -->
+            <div class="post-author">
+              <a href="{% url 'profile' post.user.username %}">{{ post.user }}</a>
+            </div>
+            <!-- Post Title -->
+            <h2 class="post-title">{{ post.title }}</h2>
+            <!-- Post Meta -->
+            <div class="post-meta">
+              <span><i class="icon-calendar"></i> {{ post.created_at }}</span>
+              <span><i class="icon-comment"></i> {{ post.comments.count }}</span>
+            </div>
+            <!-- Post Text -->
+            <p class="post-text">{{ post.content }}</p>
+            <!-- Post Comments -->
+            <div class="post-comments">
+              {% for comment in post.comments.all %}
+                <!-- Comment -->
+                <div class="comment">
+                  <!-- Comment Author -->
+                  <div class="comment-author">
+                    <a href="{% url 'profile' comment.user.username %}">{{ comment.user }}</a>
+                  </div>
+                  <!-- Comment Text -->
+                  <p class="comment-text">{{ comment.text }}</p>
+                </div>
+              {% endfor %}
+            </div>
+            <!-- Comment Form -->
+            <div class="post-comment-form">
+              <form method="post" action="{% url 'comment_create' %}">
+                {% csrf_token %}
+                <input type="hidden" name="post_id" value="{{ post.id }}">
+                <div class="form-group">
+                  <textarea name="text" class="form-control" rows="3" placeholder="Your Comment"></textarea>
+                </div>
+                <button type="submit" class="btn btn-primary">Post Comment</button>
+              </form>
+            </div>
+          </div>
+        </div>
+        <!-- /Post -->
+      {% endfor %}
+    </div>
+    <div class="col-md-4">
+      <div class="sidebar">
+        <div class="sidebar-box">
+          <h3>Analytics</h3>
+          <div id="analytics-graph"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+<script src="{% static 'js/chart.min.js' %}"></script>
+<script>
+// Analytics graph data
+var graphData = [
+  {% for user in users %}
+    { label: '{{ user.username }}', data: [{{ post.comments.count }}], backgroundColor: '{{ user.color }}' },
+  {% endfor %}
+];
+// Create analytics graph
+var ctx = document.getElementById('analytics-graph').getContext('2d');
+var analyticsGraph = new Chart(ctx, {
+  type: 'bar',
+  data: {
+    labels: [{% for user in users %}'{{ user.username }}',{% endfor %}
+    ],
+    datasets: graphData,
+  },
+  options: {
+    responsive: true,
+    maintainAspectRatio: false,
+    scales: {
+      yAxes: [{ ticks: { beginAtZero: true } }],
+    },
+    legend: {
+      display: false,
+    },
+  },
+});
+</script>
