@@ -209,7 +209,7 @@ class ProjectSessionAuthMiddleware:
         alias = getattr(request, 'project_db_alias', 'default')
         user = request.user
 
-        # If we’re under /projects/<id>/…, try to authenticate
+        # If we're under /projects/<id>/…, try to authenticate
         if alias.startswith('project_'):
             # First, try session-based authentication
             uid = request.session.get(SESSION_KEY)
@@ -267,54 +267,100 @@ class ProjectSessionAuthMiddleware:
 
 
 from channels.middleware import BaseMiddleware
-
+from urllib.parse import parse_qs
 from asgiref.sync import sync_to_async
+from django.contrib.auth import get_user_model
+from django.contrib.auth.models import AnonymousUser
+from rest_framework_simplejwt.tokens import AccessToken
+from rest_framework_simplejwt.exceptions import TokenError, InvalidToken
+import logging
 
-@sync_to_async
-def get_user_from_token(token):
+logger = logging.getLogger(__name__)
+
+async def get_user_from_token(token):
+    """
+    Authenticate user from JWT token (async-compatible)
+    """
+    User = get_user_model()
+    
     try:
-        validated = JWTAuthentication().get_validated_token(token)
-        return JWTAuthentication().get_user(validated)
-    except (InvalidToken, TokenError):
+        # Validate the token
+        validated_token = AccessToken(token)
+        
+        # Get user from token
+        user_id = validated_token.get('user_id')
+        
+        if not user_id:
+            logger.error("No user_id in token payload")
+            return AnonymousUser()
+        
+        # Get the user from database using sync_to_async
+        try:
+            user = await sync_to_async(User.objects.get)(id=user_id)
+            return user
+        except User.DoesNotExist:
+            logger.error(f"User with ID {user_id} not found")
+            return AnonymousUser()
+            
+    except (TokenError, InvalidToken) as e:
+        logger.error(f"Token validation error: {str(e)}")
+        return AnonymousUser()
+    except Exception as e:
+        logger.error(f"Unexpected error in get_user_from_token: {str(e)}")
         return AnonymousUser()
 
-class QueryAuthMiddleware(BaseMiddleware):
+class QueryAuthMiddleware:
+    """
+    Custom middleware that takes a token from the query string and authenticates the user
+    """
+    def __init__(self, app):
+        self.app = app
+
     async def __call__(self, scope, receive, send):
-        qs = parse_qs(scope.get("query_string", b"").decode())
-        token_list = qs.get("token")
+        if scope["type"] not in ["websocket", "http"]:
+            return await self.app(scope, receive, send)
 
-        if token_list:
-            scope["user"] = await get_user_from_token(token_list[0])
+        # Get token from query string
+        query_string = scope.get("query_string", b"").decode()
+        query_params = parse_qs(query_string)
+        
+        # Check for token in query string
+        token = query_params.get("token", [None])[0]
+        
+        if token:
+            # Authenticate user from token
+            user = await get_user_from_token(token)
+            if user and user.is_authenticated:
+                logger.info(f"User authenticated via token: {user.username}")
+                scope["user"] = user
+                return await self.app(scope, receive, send)
+            else:
+                logger.error(f"Authentication failed for token")
         else:
-            scope["user"] = AnonymousUser()
+            logger.error("No token provided in query string")
 
-        return await super().__call__(scope, receive, send)
+        # No valid token/user - close connection with authentication error
+        if scope["type"] == "websocket":
+            return await self.close_websocket(send)
+        else:
+            return await self.app(scope, receive, send)
 
-class QueryAuthMiddlewareInstance:
-    def __init__(self, scope, inner):
-        self.scope = dict(scope)
+    async def close_websocket(self, send):
+        """Helper to close websocket with auth failure"""
+        await send({
+            "type": "websocket.close",
+            "code": 4003,  # Custom close code for auth failure
+        })
+
+class QueryAuthMiddlewareStack:
+    """
+    Wrapper for the QueryAuthMiddleware that handles the middleware stack
+    """
+    def __init__(self, inner):
         self.inner = inner
 
-    async def __call__(self, receive, send):
-        # parse token
-        qs = parse_qs(self.scope.get("query_string", b"").decode())
-        token_list = qs.get("token", None)
-        user = AnonymousUser()
-
-        if token_list:
-            token = token_list[0]
-            try:
-                validated = JWTAuthentication().get_validated_token(token)
-                user = JWTAuthentication().get_user(validated)
-            except (InvalidToken, TokenError):
-                pass
-
-        self.scope["user"] = user
-        inner = self.inner(self.scope)
-        return await inner(receive, send)
-
-def QueryAuthMiddlewareStack(inner):
-    return QueryAuthMiddleware(inner)
+    def __call__(self, scope, receive, send):
+        return QueryAuthMiddleware(self.inner)(scope, receive, send)
 
 # core/middleware.py
 import logging

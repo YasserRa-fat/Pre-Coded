@@ -12,14 +12,15 @@ from .serializers import (UserSerializer, UserModelSerializer, ModelFileSerializ
  ProjectSerializer,AppSerializer, ViewFileSerializer,FormFileSerializer, ProjectFileSerializer,SettingsFileSerializer,
  URLFileSerializer,AppFileSerializer, MediaFileSerializer, TemplateFileSerializer, StaticFileSerializer,
      AIConversationSerializer,AIMessageSerializer,AIChangeRequestSerializer,
-
+     AppSerializer,AppFileSerializer,AppFile,AppFileSerializer,AppFileSerializer,
 )
+from asgiref.sync import sync_to_async
 from rest_framework.exceptions import NotFound
 from django.shortcuts import get_object_or_404
 from rest_framework.parsers import MultiPartParser, FormParser
 from django.conf import settings
 from django.urls import reverse
-
+from django.shortcuts import render
 from django.http import JsonResponse
 from django.db import models, connection
 from django.db.models import Q
@@ -43,7 +44,11 @@ from .utils import (
 )
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_POST
-from asgiref.sync import sync_to_async
+from django.utils import timezone
+from datetime import timedelta
+from django.db.models import Count
+from django.db.models.functions import TruncDate
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -1700,6 +1705,19 @@ class PreviewRunAPIView(APIView):
                             {"error": "Change request has no diff data"},
                             status=status.HTTP_400_BAD_REQUEST
                         )
+                    
+                    # Set up preview project with changes
+                    preview_alias = f"preview_{project_id}_after_{change_id}"
+                    raw_label = change.app_name.lower() if change.app_name else "app"
+                    
+                    try:
+                        # Set up the preview project with changes
+                        modified_files = setup_preview_project(project_id, preview_alias, raw_label, change_id)
+                        logger.debug(f"Successfully set up preview project with {len(modified_files)} modified files")
+                    except Exception as setup_err:
+                        logger.error(f"Error setting up preview project: {str(setup_err)}")
+                        # Continue anyway - we'll still generate the URL and the preview will handle errors
+                
                 except AIChangeRequest.DoesNotExist:
                     logger.error(f"Change request not found: id={change_id}, project_id={project_id}")
                     return Response(
@@ -1711,11 +1729,16 @@ class PreviewRunAPIView(APIView):
             host = request.get_host()
             protocol = 'https' if request.is_secure() else 'http'
             
-            url_params = [f"preview_mode={mode}"]
-            if mode == 'after' and change_id:
-                url_params.append(f"preview_change_id={change_id}")
-            
-            url = f"{protocol}://{host}/projects/{project_id}/?{'&'.join(url_params)}"
+            # Direct URL to the running project for "before" mode
+            if mode == 'before':
+                url = f"{protocol}://{host}/projects/{project_id}/"
+            else:
+                # URL with special parameters for "after" mode
+                url_params = [f"preview_mode={mode}"]
+                if change_id:
+                    url_params.append(f"preview_change_id={change_id}")
+                
+                url = f"{protocol}://{host}/projects/{project_id}/?{'&'.join(url_params)}"
             
             logger.debug(f"Preview URL generated: {url}")
             
@@ -2185,7 +2208,6 @@ def preview_project(request, project_id, preview_alias, raw_label, ai_diff_code=
         logger.error(f"Error in preview_project: {str(e)}")
         logger.error(traceback.format_exc())
         return JsonResponse({'error': str(e)}, status=500)
-
 @sync_to_async
 def setup_preview_project(project_id, preview_alias, raw_label, change_id=None):
     """

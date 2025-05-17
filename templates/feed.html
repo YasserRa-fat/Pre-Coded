@@ -2,26 +2,54 @@
 {% load static %}
 
 {% block content %}
-<div id="gtco-main">
-  <div class="container">
-    {% if user.is_authenticated %}
-    <div class="row row-pb-md">
-      <div class="col-md-12">
-        <div class="analytics-section animate-box" data-animate-effect="fadeIn">
-          <h3>Comment Activity (Last 10 Days)</h3>
-          <div class="analytics-chart-container">
-            <canvas id="commentActivityChart"></canvas>
+<body>
+  <div class="gtco-loader"></div>
+  <div id="page">
+    <!-- Existing nav code -->
+    {% include "nav.html" %}
+
+    <header id="gtco-header" class="gtco-cover" role="banner" style="background-image: url({% static 'images/img_1.jpg' %})"
+      data-stellar-background-ratio="0.5">
+      <div class="overlay"></div>
+      <div class="container">
+        <div class="row">
+          <div class="col-md-7 text-left">
+            <div class="display-t">
+              <div class="display-tc animate-box" data-animate-effect="fadeInUp">
+                <span class="date-post">Feed</span>
+                <h1 class="mb30"><a href="#">Welcome {{request.user}}</a></h1>
+                {% if request.user.is_authenticated %}
+                <p><a href="{% url 'post_create' %}" class="text-link">Create a Post</a></p>
+                {% else %}
+                <p><a href="{% url 'register' %}" class="text-link">Register</a> or <a href="{% url 'login' %}" class="text-link">Login</a> to post</p>
+                {% endif %}
+              </div>
+            </div>
           </div>
         </div>
       </div>
-    </div>
-    {% endif %}
+    </header>
 
-    <div class="row row-pb-md">
-      <div class="col-md-12">
-        <ul id="gtco-post-list">
-          {% if posts %}
-            {% for p in posts %}
+    <div id="gtco-main">
+      <div class="container">
+        {% if request.user.is_authenticated %}
+        <!-- Analytics Section -->
+        <div class="row row-pb-md">
+          <div class="col-md-12">
+            <div class="analytics-box animate-box" data-animate-effect="fadeIn">
+              <h3>Your Post Interactions</h3>
+              <div id="interactionsChart" style="height: 300px;"></div>
+            </div>
+          </div>
+        </div>
+        {% endif %}
+
+        <!-- Existing Posts Section -->
+        <div class="row row-pb-md">
+          <div class="col-md-12">
+            <ul id="gtco-post-list">
+              {% if posts %}
+              {% for p in posts %}
               <li class="one-third entry animate-box" data-animate-effect="fadeIn">
                 <a href="{% url 'detail' p.id %}">
                   <div class="entry-img" style="background-image: url('{{p.image.url}}')"></div>
@@ -32,76 +60,103 @@
                 </a>
                 <a href="{% url 'detail' p.id %}" class="post-meta">{{p.user}} <span class="date-posted">{{p.created_at}}</span></a>
               </li>
-            {% endfor %}
-          {% endif %}
-        </ul>
+              {% endfor %}
+              {% endif %}
+            </ul>
+          </div>
+        </div>
+
+        <!-- Pagination -->
+        <div class="row">
+          <div class="col-md-12 text-center">
+            <nav aria-label="Page navigation">
+              <ul class="pagination">
+                <li>
+                  <a href="#" aria-label="Previous">
+                    <span aria-hidden="true">&laquo;</span>
+                  </a>
+                </li>
+                <li class="active"><a href="#">1</a></li>
+                <li><a href="#">2</a></li>
+                <li><a href="#">3</a></li>
+                <li><a href="#">4</a></li>
+                <li><a href="#">5</a></li>
+                <li>
+                  <a href="#" aria-label="Next">
+                    <span aria-hidden="true">&raquo;</span>
+                  </a>
+                </li>
+              </ul>
+            </nav>
+          </div>
+        </div>
       </div>
     </div>
+
+    <footer id="gtco-footer" role="contentinfo">
+      {% include "footer.html" %}
+    </footer>
   </div>
-</div>
 
-{% if user.is_authenticated %}
-<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-<script>
-document.addEventListener('DOMContentLoaded', function() {
-  const ctx = document.getElementById('commentActivityChart').getContext('2d');
-  new Chart(ctx, {
-    type: 'line',
-    data: {
-      labels: {{ analytics_data.labels|safe }},
-      datasets: [{
-        label: 'Comments on Your Posts',
-        data: {{ analytics_data.data|safe }},
-        borderColor: '#007bff',
-        backgroundColor: 'rgba(0, 123, 255, 0.1)',
-        borderWidth: 2,
-        tension: 0.4,
-        fill: true
-      }]
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      plugins: {
-        legend: {
-          position: 'top',
-        },
-        title: {
-          display: true,
-          text: 'Comment Activity Over Time'
-        }
-      },
-      scales: {
-        y: {
-          beginAtZero: true,
-          ticks: {
-            stepSize: 1
+  {% block extra_js %}
+  <!-- Chart.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  
+  <script>
+    document.addEventListener('DOMContentLoaded', function() {
+      {% if request.user.is_authenticated %}
+        // Fetch analytics data
+        fetch('/api/analytics/interactions/?days=10', {
+          headers: {
+            'Authorization': 'Bearer ' + localStorage.getItem('token')
           }
-        }
-      }
-    }
-  });
-});
-</script>
-<style>
-.analytics-section {
-  background: #fff;
-  padding: 2rem;
-  border-radius: 8px;
-  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-  margin-bottom: 2rem;
-}
-
-.analytics-section h3 {
-  margin-bottom: 1.5rem;
-  color: #333;
-  font-size: 1.5rem;
-}
-
-.analytics-chart-container {
-  height: 400px;
-  position: relative;
-}
-</style>
-{% endif %}
+        })
+        .then(response => response.json())
+        .then(data => {
+          const ctx = document.getElementById('interactionsChart').getContext('2d');
+          new Chart(ctx, {
+            type: 'line',
+            data: {
+              labels: data.dates,
+              datasets: [{
+                label: 'Comments on Your Posts',
+                data: data.counts,
+                borderColor: '#2D3001',
+                backgroundColor: 'rgba(45, 48, 1, 0.1)',
+                tension: 0.4,
+                fill: true
+              }]
+            },
+            options: {
+              responsive: true,
+              maintainAspectRatio: false,
+              plugins: {
+                legend: {
+                  position: 'top',
+                },
+                title: {
+                  display: true,
+                  text: 'Post Interactions (Last 10 Days)'
+                }
+              },
+              scales: {
+                y: {
+                  beginAtZero: true,
+                  ticks: {
+                    stepSize: 1
+                  }
+                }
+              }
+            }
+          });
+        })
+        .catch(error => {
+          console.error('Error fetching analytics:', error);
+          document.getElementById('interactionsChart').innerHTML = 'Error loading analytics data';
+        });
+      {% endif %}
+    });
+  </script>
+  {% endblock %}
+</body>
 {% endblock %} 

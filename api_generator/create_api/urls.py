@@ -55,7 +55,7 @@ from .views import (
      PreviewOneView,
      ApplyChangesAPIView,
      FullPreviewDiffAPIView,
-     PreviewRunAPIView
+     PreviewRunAPIView,
 )
 
 # router for your AI endpoints

@@ -112,14 +112,67 @@ async def lifespan_handler(scope, receive, send):
 from channels.routing import ProtocolTypeRouter, URLRouter
 from django.urls import re_path
 from core.middleware import QueryAuthMiddleware
-from create_api.consumers import AIChatConsumer
+from create_api.consumers import ProjectConsumer
 
 application = ProtocolTypeRouter({
     "http": get_asgi_application(),
     "websocket": QueryAuthMiddleware(
         URLRouter([
-            re_path(r"^ws/projects/(?P<project_id>\d+)/ai/$", AIChatConsumer.as_asgi()),
+            re_path(r"^ws/projects/(?P<project_id>\d+)/ai/$", ProjectConsumer.as_asgi()),
         ])
     ),
     "lifespan": lifespan_handler,
 })
+
+# Add debug logging for WebSocket connections
+import logging
+logger = logging.getLogger(__name__)
+
+class DebuggedProtocolTypeRouter(ProtocolTypeRouter):
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "websocket":
+            logger.debug(f"WebSocket connection attempt: {scope.get('path', '')}")
+            logger.debug(f"Query string: {scope.get('query_string', b'').decode()}")
+        
+        try:
+            return await super().__call__(scope, receive, send)
+        except Exception as e:
+            logger.error(f"Error in protocol router: {str(e)}")
+            if scope["type"] == "websocket":
+                await send({
+                    "type": "websocket.close",
+                    "code": 4000,
+                })
+            raise
+
+# Use the debugged router
+application = DebuggedProtocolTypeRouter({
+    "http": get_asgi_application(),
+    "websocket": QueryAuthMiddleware(
+        URLRouter([
+            re_path(r"^ws/projects/(?P<project_id>\d+)/ai/$", ProjectConsumer.as_asgi()),
+        ])
+    ),
+    "lifespan": lifespan_handler,
+})
+
+# Add logging configuration if not already present
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'handlers': {
+        'console': {
+            'class': 'logging.StreamHandler',
+        },
+    },
+    'loggers': {
+        'django': {
+            'handlers': ['console'],
+            'level': 'INFO',
+        },
+        'api_generator': {
+            'handlers': ['console'],
+            'level': 'DEBUG',
+        },
+    },
+}

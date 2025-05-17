@@ -62,6 +62,43 @@
   border-bottom-left-radius: 4px;
 }
 
+/* Typing indicator */
+.typing-indicator {
+  display: flex;
+  align-items: center;
+  min-width: 70px;
+  padding: 0.5rem 1rem !important;
+}
+
+.typing-indicator span {
+  height: 8px;
+  width: 8px;
+  float: left;
+  margin: 0 1px;
+  background-color: #fff;
+  display: block;
+  border-radius: 50%;
+  opacity: 0.4;
+}
+
+.typing-indicator span:nth-of-type(1) {
+  animation: 1s blink infinite 0.3333s;
+}
+
+.typing-indicator span:nth-of-type(2) {
+  animation: 1s blink infinite 0.6666s;
+}
+
+.typing-indicator span:nth-of-type(3) {
+  animation: 1s blink infinite 0.9999s;
+}
+
+@keyframes blink {
+  50% {
+    opacity: 1;
+  }
+}
+
 /* Review Buttons */
 .review-buttons {
   display: flex;
@@ -110,6 +147,10 @@
 .input-row input:focus {
   border-color: #1f4e79;
 }
+.input-row input:disabled {
+  background-color: #f5f5f5;
+  cursor: not-allowed;
+}
 .input-row .send-btn {
   margin-left: 0.5rem;
   padding: 0.6rem 1rem;
@@ -121,6 +162,10 @@
   font-weight: 500;
   transition: background 0.2s;
 }
-.input-row .send-btn:hover {
+.input-row .send-btn:hover:not(:disabled) {
   background: #163955;
+}
+.input-row .send-btn:disabled {
+  background-color: #91adc6;
+  cursor: not-allowed;
 }

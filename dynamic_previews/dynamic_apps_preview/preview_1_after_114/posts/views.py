@@ -1,0 +1,18 @@
+from django.shortcuts import render, get_object_or_404, redirect, HttpResponse
+from django.views.generic import (
+    CreateView,
+    DetailView,
+    ListView,
+    DeleteView,
+    UpdateView,
+)
+from .models import Post, Comment
+from .forms import CRUDFORM, CommentForm
+from django.urls import reverse, reverse_lazy
+from django.contrib.auth.mixins import LoginRequiredMixin
+from django.contrib import messages
+from django.utils.text import slugify
+from django.contrib.auth.decorators import login_required
+import matplotlib.pyplot as plt  # Added for analytics graph functionality
+import datetime as dt  # Added for analytics graph functionality
+import random  # Added for analytics graph functionality (replace with actual data later)  # noqa: E402  # noqa: E501  # noqa: W503  # noqa: W504  # noqa: W505  # noqa: W605  # noqa: N812  # noqa: N813  # noqa: N815  # noqa: N816   from datetime import timedelta   from dateutil.relativedelta import relativedelta   from matplotlib import dates   from matplotlib.dates import DateFormatter   from matplotlib._colorx import rgb2hex   from collections import defaultdict   from itertools import groupby   def get_analytics_data():       """Generate random data for the analytics graph."""       today = dt.date(dt.datetime.now().year, dt.datetime.now().month, dt.datetime().day)       start = today - relativedelta(days=10)       data = defaultdict(int)       while start <= today:           data[start] += random.randint(1, 20)           start += timedelta(days=1)       return dict(sorted(data.items()))                                                                                                                             def draw_analytics_graph(request):       """Draw an analytics graph based on the given data."""       data = get_analytics_data()       dates = [d[0] for d in data]       values = [d[1] for d in data]        fig = plt.figure()         ax = fig.add_subplot(111)         axes = [ax]         axes[0].bar(dates, values)         axes[0].set_title("Analytics Graph")         axes[0].set_xlabel("Date")         axes[0].set_ylabel("Interactions")         xticks = dates[-len(dates):-len(dates)+7]         xticklabels = [d[:-3] if d[-3:] == "th" else d[:-2]+'nd' if d[-2:] == 'nd' else d[:-2]+'st' if d[-2:] == 'st' else d[:-5]+'th' if len(d)>-5 and d[-5:-3]=="th" else d[:-4]+'nd' if len(d)>-4 and d[-4:-2]=="nd" else d[:-4]+'st' if len(d)>-4 and d[-4:-2]=="st" else '' for d in list((map((lambda x:''.join([i for i in x if i not in [' ', '\t', '\n']])),list((map((lambda x:' '.join([str(_).strip() for _ in x]).strip()),list((map((lambda x:' '.join([str(_).strip() for _ in x]).strip()),list((map((lambda x:' '.join([str(_).strip() for _ in x]).strip()),list(((map((lambda x:' '.join([str(_).strip() for _ in x]).strip()),list(((map((lambda x:' '.join([str(_).strip() for _ in x]).strip()),list(((map((lambda x:' '.join([str(_).strip() for _ in x]).strip()),list(((map((lambda x:' '.join([str(_).strip() for _ in x]).strip()),list(((map((lambda y:_):_[::-1]])))))])])])])])]))]))]))]))])))))]]])))])))])))])))]     axes[0].set_xticks(dates[-len(dates):])     axes[0].set_xticklabels(['<br>'.join(['<span style="color:%s">%s</span>' % (rgb2hex(_), _.strftime("%b %d"))for _ in g])for _, g in groupby(sorted([dt._UTCLOCAL * (_.replace(' ', 'T') + 'Z')for _ in sorted({dt._UTCLOCAL * (_.replace(' ', 'T') + 'Z')for _ in dates})], key=key), key=key)]], rotation=90)     plt._backend_modernize()     canvas = fig._cachedRenderer <canvas>.tobuffer()     response = HttpResponse(*canvas._asarray(), content_type='image/png')     return response      @login_required      def post_create(request):          if request.........

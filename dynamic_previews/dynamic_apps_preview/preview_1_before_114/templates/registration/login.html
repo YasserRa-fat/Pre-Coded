@@ -1,0 +1,26 @@
+- Use Django ORM
+- Use Django REST Framework
+- Use Django Channels
+- Use Django Rest Auth
+
+```html
+<!-- registration/login.html -->
+
+{% extends "base_generic.html" %}
+
+{% block content %}
+  <h2>Login</h2>
+  <form method="post">
+    {% csrf_token %}
+    {{ form.as_p }}
+    <button type="submit">Login</button>
+  </form>
+{% endblock %}
+```
+
+To add an analytics graph on the user's feed page before the posts showing interactions in past 10 days based on comments made on their posts, you will need to do the following:
+
+1. Create a new view that will handle the logic for rendering the analytics graph and the posts with interactions.
+2. Add a URL pattern to the `urls.py` file to map the view to a specific URL.
+3. In the view, use the Django ORM to query the database for the necessary data to display the analytics graph and the posts with interactions.
+4. Use a library

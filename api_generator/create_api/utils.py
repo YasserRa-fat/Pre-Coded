@@ -4,6 +4,9 @@ import openai
 from gpt4all import GPT4All
 import os
 from dotenv import load_dotenv
+import aiohttp
+import asyncio
+import time
 
 # Load environment variables from .env file
 load_dotenv()
@@ -260,16 +263,13 @@ def quick_summary(model_name, fields, relationships):
     return summary
 
 def call_inference_api(api_url, headers, payload, retries=3, backoff=5):
-    """
-    Call the inference API with retries.
-    Returns the JSON response if successful, or raises the last encountered exception.
-    """
     for attempt in range(retries):
         try:
             response = requests.post(api_url, headers=headers, json=payload, timeout=60)
             response.raise_for_status()
-            return response.json()
-        except Exception as e:
+            result = response.json()
+            return result
+        except requests.RequestException as e:
             if attempt < retries - 1:
                 time.sleep(backoff)
             else:
@@ -313,23 +313,11 @@ Provide a human-readable summary with at most 40 words of this model's purpose, 
 
     for attempt in range(retries):
         try:
-            response = requests.post(url, json=payload, headers=headers)
-            if response.status_code == 429:
-                logger.warning(f"Rate limited. Retry {attempt + 1}/{retries} after {backoff} seconds.")
-                time.sleep(backoff)
-                backoff *= 2  # exponential backoff
-                continue
-            response.raise_for_status()
-            result = response.json()
-            logger.debug("generate_ai_summary response: %s", result)
-            choices = result.get("choices")
-            if choices and isinstance(choices, list) and len(choices) > 0:
-                if isinstance(choices[0], dict) and "text" in choices[0]:
-                    return choices[0]["text"].strip().split("\n")[0]
-                elif isinstance(choices[0], str):
-                    return choices[0].strip().split("\n")[0]
+            response = call_inference_api(url, headers, payload)
+            if response.get("choices") and isinstance(response["choices"][0], dict) and "text" in response["choices"][0]:
+                return response["choices"][0]["text"].strip().split("\n")[0]
             return "Error: Unexpected API response format."
-        except requests.exceptions.RequestException as e:
+        except requests.RequestException as e:
             logger.error(f"RequestException on attempt {attempt + 1}: {str(e)}")
             time.sleep(backoff)
             backoff *= 2
@@ -351,18 +339,11 @@ Provide a human-readable summary (max 40 words) of this view's purpose. Start wi
     }
     headers = {"Authorization": f"Bearer {API_KEY}"}
     try:
-        response = requests.post(url, json=payload, headers=headers)
-        response.raise_for_status()
-        result = response.json()
-        print("generate_view_ai_summary response:", result)
-        choices = result.get("choices")
-        if choices and isinstance(choices, list) and len(choices) > 0:
-            if isinstance(choices[0], dict) and "text" in choices[0]:
-                return choices[0]["text"].strip().split("\n")[0]
-            elif isinstance(choices[0], str):
-                return choices[0].strip().split("\n")[0]
+        response = call_inference_api(url, headers, payload)
+        if response.get("choices") and isinstance(response["choices"][0], dict) and "text" in response["choices"][0]:
+            return response["choices"][0]["text"].strip().split("\n")[0]
         return "Error: Unexpected API response format."
-    except requests.exceptions.RequestException as e:
+    except requests.RequestException as e:
         return f"Error generating AI summary: {str(e)}"
     
     
@@ -559,20 +540,11 @@ Example format:
     try:
         max_retries = 2
         for attempt in range(max_retries):
-            response = requests.post(url, json=payload, headers=headers)
-            response.raise_for_status()
-            result = response.json()
-            print("generate_view_ai_summary_batch response:", result)
-            choices = result.get("choices")
-            if not choices or not ((isinstance(choices[0], dict) and "text" in choices[0]) or isinstance(choices[0], str)):
-                print(f"Attempt {attempt + 1}: Unexpected API response, retrying...")
-                time.sleep(1)
-                continue
-            # If choices[0] is a dict, extract its text; if it's a string, use it directly.
-            if isinstance(choices[0], dict) and "text" in choices[0]:
-                raw_text = choices[0]["text"]
+            response = call_inference_api(url, headers, payload)
+            if response.get("choices") and isinstance(response["choices"][0], dict) and "text" in response["choices"][0]:
+                raw_text = response["choices"][0]["text"]
             else:
-                raw_text = choices[0]
+                raw_text = response["choices"][0]
             lines = raw_text.strip().split('\n')
             # Filter lines that start with a digit followed by a parenthesis.
             valid_lines = [line for line in lines if re.match(r'^\d+\)', line.strip())]
@@ -589,7 +561,7 @@ Example format:
             matches.sort(key=lambda x: x["num"])
             return [m["text"].strip() for m in matches]
         return ["Error: Max retries exceeded."] * len(views_data)
-    except requests.exceptions.RequestException as e:
+    except requests.RequestException as e:
         return [f"Error generating AI summary: {str(e)}"] * len(views_data)
 
 def extract_forms_from_code(code):
@@ -660,20 +632,11 @@ Example format:
     try:
         max_retries = 2
         for attempt in range(max_retries):
-            response = requests.post(url, json=payload, headers=headers)
-            response.raise_for_status()
-            result = response.json()
-            print("generate_form_ai_summary_batch response:", result)
-            choices = result.get("choices")
-            if not choices or not ((isinstance(choices[0], dict) and "text" in choices[0]) or isinstance(choices[0], str)):
-                print(f"Attempt {attempt + 1}: Unexpected API response, retrying...")
-                time.sleep(1)
-                continue
-            # Extract text.
-            if isinstance(choices[0], dict) and "text" in choices[0]:
-                raw_text = choices[0]["text"]
+            response = call_inference_api(url, headers, payload)
+            if response.get("choices") and isinstance(response["choices"][0], dict) and "text" in response["choices"][0]:
+                raw_text = response["choices"][0]["text"]
             else:
-                raw_text = choices[0]
+                raw_text = response["choices"][0]
             lines = raw_text.strip().split('\n')
             valid_lines = [line for line in lines if re.match(r'^\d+\)', line.strip())]
             pattern = r'^(\d+)\)\s*(.*)$'
@@ -689,7 +652,7 @@ Example format:
             matches.sort(key=lambda x: x["num"])
             return [m["text"].strip() for m in matches]
         return ["Error: Max retries exceeded."] * len(forms_data)
-    except requests.exceptions.RequestException as e:
+    except requests.RequestException as e:
         return [f"Error generating AI summary: {str(e)}"] * len(forms_data) 
     
 from unidiff import PatchSet,UnidiffParseError

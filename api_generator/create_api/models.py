@@ -267,26 +267,37 @@ class AIChangeRequest(models.Model):
         ('view', 'View'),
         ('form', 'Form'),
         ('app', 'New App'),
+        ('multi', 'Multiple Files'),
+        ('static', 'Static File'),
         ('other', 'Other')
     ])
     project = models.ForeignKey(Project, on_delete=models.CASCADE)
     file_path = models.CharField(max_length=512, blank=True, null=True)
+    app_name = models.CharField(max_length=100, default="main")
     diff = models.TextField()
-    files        = models.JSONField(default=list, help_text="List of file paths this diff applies to")
+    files = models.JSONField(default=list, help_text="List of file paths this diff applies to")
     status = models.CharField(max_length=16, choices=[
         ('draft', 'Draft'),
         ('applied', 'Applied'),
-        ('rejected', 'Rejected')
+        ('rejected', 'Rejected'),
+        ('pending', 'Pending')
     ], default='draft')
     created_at = models.DateTimeField(auto_now_add=True)
-    app_name = models.CharField(
-        max_length=100,
-        null=False,
-        blank=False,
-        help_text="The Django app label (e.g. 'project_1_posts') this change targets"
-    )
+    updated_at = models.DateTimeField(auto_now=True)
+
     def __str__(self):
         return f"ChangeRequest {self.id} ({self.status})"
+
     def save(self, *args, **kwargs):
-        print(f"Saving ChangeRequest {self.id}")
+        if not self.app_name and self.file_path:
+            parts = self.file_path.split('/')
+            if len(parts) > 0:
+                for part in parts:
+                    if part in ['posts', 'users', 'accounts', 'comments']:
+                        self.app_name = part
+                        break
+        
+        if not self.app_name:
+            self.app_name = "main"
+            
         super().save(*args, **kwargs)

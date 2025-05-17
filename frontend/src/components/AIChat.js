@@ -10,6 +10,7 @@ export default function AIChat({ projectId, appName, filePath, onDiff }) {
   const wsRef = useRef(null);
   const messagesEnd = useRef(null);
   const [isConnected, setIsConnected] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
 
   // Memoize the onDiff callback to use in handlers without dependency issues
   const handleDiff = useCallback((diffData) => {
@@ -36,6 +37,7 @@ export default function AIChat({ projectId, appName, filePath, onDiff }) {
     ws.onopen = () => {
       console.log('WebSocket connected');
       setIsConnected(true);
+      setMessages(m => [...m, { sender: 'assistant', text: 'AI assistant connected. Ask me to modify your project!' }]);
     };
 
     ws.onmessage = e => {
@@ -46,52 +48,108 @@ export default function AIChat({ projectId, appName, filePath, onDiff }) {
 
         if (kind === 'show_diff_modal') {
           console.log('Handling show_diff_modal:', msg);
-          const validFiles = msg.files.filter(p => typeof p === 'string');
-          if (!validFiles.length) {
-            console.error('No valid files in show_diff_modal:', msg.files);
-            setMessages(m => [...m, { sender: 'assistant', text: 'Error: No valid files to review' }]);
+          setIsLoading(false);
+          
+          // Handle files as either an object map or array
+          let formattedFiles = [];
+          
+          if (msg.files) {
+            if (Array.isArray(msg.files)) {
+              // Already an array format
+              formattedFiles = msg.files.map(file => {
+                // Ensure it has the right structure
+                return {
+                  filePath: typeof file === 'string' 
+                    ? file.replace(/^templates\//, '') 
+                    : (file.filePath || '').replace(/^templates\//, ''),
+                  fullPath: typeof file === 'string' ? file : (file.fullPath || file.filePath || ''),
+                  before: typeof file === 'object' ? (file.before || '') : (msg.diff?.[file] || ''),
+                  after: typeof file === 'object' ? (file.after || '') : (msg.files[file] || ''),
+                  projectId,
+                  changeId: msg.change_id,
+                };
+              });
+            } else if (typeof msg.files === 'object' && !Array.isArray(msg.files)) {
+              // Files is an object map of path -> content
+              formattedFiles = Object.keys(msg.files).map(path => ({
+                filePath: path.replace(/^templates\//, ''),
+                fullPath: path,
+                before: msg.diff?.[path] || '',
+                after: msg.files[path] || '',
+                projectId,
+                changeId: msg.change_id,
+              }));
+            }
+          }
+
+          if (!formattedFiles.length) {
+            console.error('No files in show_diff_modal:', msg.files);
+            setMessages(m => [...m, { sender: 'assistant', text: 'Error: No files to review' }]);
             return;
           }
 
           setChangeId(msg.change_id);
           setStatus('review');
           
+          // Default preview URLs if none provided
+          const previewMap = msg.previewMap || {
+            before: `/api/projects/${projectId}/preview/?mode=before`,
+            after: `/api/projects/${projectId}/preview/?change_id=${msg.change_id}&mode=after`
+          };
+          
           handleDiff({
-            files: validFiles,
-            previewMap: {
-              before: `/api/projects/${projectId}/preview/?mode=before`,
-              after: `/api/projects/${projectId}/preview/?change_id=${msg.change_id}&mode=after`
-            },
-            beforeMap: msg.diff,
-            afterMap: msg.diff,
-            change_id: msg.change_id
+            files: formattedFiles,
+            previewMap,
+            change_id: msg.change_id,
+            beforeMap: msg.diff || {},
+            afterMap: msg.files || {}
           });
           return;
         }
 
         if (kind === 'error') {
           console.error('Server error:', msg.message);
+          setIsLoading(false);
           setMessages(m => [...m, { sender: 'assistant', text: `Error: ${msg.message}` }]);
           return;
         }
 
+        if (kind === 'status') {
+          if (msg.status === 'thinking') {
+            setIsLoading(true);
+          } else {
+            setIsLoading(false);
+          }
+        }
+
         if (msg.sender && msg.text) {
           setMessages(m => [...m, { sender: msg.sender, text: msg.text }]);
+          if (msg.sender === 'assistant') {
+            setIsLoading(false);
+          }
         }
       } catch (err) {
         console.error('Error parsing WS message:', err);
+        setIsLoading(false);
       }
     };
 
     ws.onerror = e => {
       console.error('WebSocket error:', e);
       setIsConnected(false);
+      setIsLoading(false);
       setMessages(m => [...m, { sender: 'assistant', text: 'WebSocket connection error' }]);
     };
 
     ws.onclose = e => {
       console.log('WebSocket closed:', e.code, e.reason);
       setIsConnected(false);
+      setIsLoading(false);
+      
+      // Only show reconnection message if there was a connection before
+      if (isConnected) {
+        setMessages(m => [...m, { sender: 'assistant', text: 'Connection closed. Refresh to reconnect.' }]);
+      }
     };
 
     wsRef.current = ws;
@@ -109,15 +167,19 @@ export default function AIChat({ projectId, appName, filePath, onDiff }) {
   const sendMessage = () => {
     if (!input.trim() || !wsRef.current || !isConnected) return;
     console.log('Sending message:', input);
-    wsRef.current.send(JSON.stringify({ type: 'send_message', text: input }));
+    wsRef.current.send(JSON.stringify({ type: 'chat_message', text: input }));
     setMessages(m => [...m, { sender: 'user', text: input }]);
     setInput('');
+    setIsLoading(true);
   };
 
   const confirm = () => {
     if (wsRef.current && changeId) {
       console.log('Confirming change:', changeId);
       wsRef.current.send(JSON.stringify({ type: 'confirm_changes', change_id: changeId }));
+      setStatus('open');
+      setChangeId(null);
+      setMessages(m => [...m, { sender: 'assistant', text: 'Changes applied successfully.' }]);
     }
   };
 
@@ -131,7 +193,7 @@ export default function AIChat({ projectId, appName, filePath, onDiff }) {
         { headers: { Authorization: `Bearer ${localStorage.getItem('access_token')}` } }
       )
       .then(() => {
-        setStatus('cancelled');
+        setStatus('open');
         setChangeId(null);
         setMessages(m => [...m, { sender: 'assistant', text: 'Changes discarded.' }]);
       })
@@ -149,6 +211,13 @@ export default function AIChat({ projectId, appName, filePath, onDiff }) {
             <div className="bubble-text">{m.text}</div>
           </div>
         ))}
+        {isLoading && (
+          <div className="msg assistant">
+            <div className="bubble-text typing-indicator">
+              <span></span><span></span><span></span>
+            </div>
+          </div>
+        )}
         <div ref={messagesEnd} />
       </div>
 
@@ -165,9 +234,14 @@ export default function AIChat({ projectId, appName, filePath, onDiff }) {
           onChange={e => setInput(e.target.value)}
           onKeyDown={e => e.key === 'Enter' && sendMessage()}
           placeholder="Ask AI to modify..."
-          disabled={!isConnected}
+          disabled={!isConnected || isLoading || status === 'review'}
         />
-        <button className="send-btn" onClick={sendMessage} disabled={!isConnected}>Send</button>
+        <button 
+          className="send-btn" 
+          onClick={sendMessage} 
+          disabled={!isConnected || isLoading || status === 'review'}>
+          Send
+        </button>
       </div>
     </div>
   );

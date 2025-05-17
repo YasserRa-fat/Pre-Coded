@@ -1,0 +1,41 @@
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+
+
+<div class="container">
+<br><br>
+{% if  request.resolver_match.url_name  == "post_create" %}
+  <h1>Create Post</h1>
+  {%else%}
+  <h1>Edit Post</h1>
+  {%endif%}
+  <form method="post" enctype="multipart/form-data">
+    {% csrf_token %}
+    <div class="form-group">
+      {{form.title.label_tag}} {{form.title}}
+    </div>
+    <br>
+    <div class="form-group">
+      {{form.description.label_tag}} {{form.description}}
+    </div>
+    <br>
+    <div class="form-group">
+        <img src="{{form.image.value.url}}" >
+    </div>
+    <br>
+    <div class="form-group">
+        {{form.image.label_tag}} {{form.image}}
+    </div>
+    <br>
+    <div class="form-group">
+      {{form.post_type.label_tag}} {{form.post_type}}
+    </div>
+    <br>
+    <div class="form-group">
+      {% if  request.resolver_match.url_name  == "post_create" %}
+    <input type="submit" value="Post"> <a href="{% url 'feed' %}"><input type="button" value="Go Back"></a>
+    {%else%}
+    <input type="submit" value="Save"> <a href="{% url 'detail' post.id %}"><input type="button" value="Go Back"></a>
+    {%endif%}
+    </div>
+  </form>
+</div>
