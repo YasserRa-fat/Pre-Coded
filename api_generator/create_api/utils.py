@@ -7,6 +7,9 @@ from dotenv import load_dotenv
 import aiohttp
 import asyncio
 import time
+from django.core.exceptions import ObjectDoesNotExist
+from .models import Project
+import logging
 
 # Load environment variables from .env file
 load_dotenv()
@@ -17,6 +20,87 @@ API_KEY = os.getenv("TOGETHER_AI_API_KEY")
 
 # Update OpenAI API key
 openai.api_key = OPENAI_API_KEY
+
+def get_current_project(request=None, project_id=None):
+    """
+    Get the current project from either request or project_id.
+    Handles database routing and project context.
+    
+    Args:
+        request: Optional HTTP request object
+        project_id: Optional project ID
+        
+    Returns:
+        Project object or None
+    """
+    logger = logging.getLogger(__name__)
+    
+    try:
+        logger.debug(f"get_current_project called with project_id={project_id}")
+        
+        if request and hasattr(request, 'project'):
+            logger.debug(f"Returning project from request.project: {request.project.id}")
+            return request.project
+            
+        if project_id:
+            # Try to use the appropriate database alias
+            try:
+                db_alias = f"project_{project_id}" 
+                from django.db import connections
+                
+                # Check if project_id exists in default database first
+                from django.db import connection
+                with connection.cursor() as cursor:
+                    cursor.execute("SELECT COUNT(*) FROM create_api_project WHERE id = %s", [project_id])
+                    exists = cursor.fetchone()[0] > 0
+                    
+                if exists:
+                    # It exists in default DB
+                    logger.debug(f"Project {project_id} found in default database")
+                    proj = Project.objects.get(id=project_id)
+                    logger.debug(f"Retrieved project {proj.id} ({proj.name}) from default DB")
+                    return proj
+                else:
+                    # Try project-specific DB
+                    logger.debug(f"Project {project_id} not in default DB, looking in {db_alias}")
+                    if db_alias in connections.databases:
+                        # Use a direct query to avoid router confusion
+                        with connections[db_alias].cursor() as cursor:
+                            cursor.execute("SELECT COUNT(*) FROM create_api_project WHERE id = %s", [project_id])
+                            if cursor.fetchone()[0] > 0:
+                                logger.debug(f"Project {project_id} found in {db_alias}")
+                                proj = Project.objects.using(db_alias).get(id=project_id)
+                                logger.debug(f"Retrieved project {proj.id} ({proj.name}) from {db_alias}")
+                                return proj
+            except Exception as e:
+                logger.error(f"Error in DB-specific lookup for project {project_id}: {str(e)}")
+            
+            # Fall back to standard lookup as last resort
+            try:
+                proj = Project.objects.get(id=project_id)
+                logger.debug(f"Retrieved project {proj.id} ({proj.name}) with fallback")
+                return proj
+            except Project.DoesNotExist:
+                logger.warning(f"Project {project_id} not found in any database")
+                return None
+            
+        if request and 'project_id' in request.session:
+            session_project_id = request.session['project_id']
+            logger.debug(f"Looking up project from session: {session_project_id}")
+            return Project.objects.get(id=session_project_id)
+            
+        logger.debug("No project lookup criteria available")
+        return None
+        
+    except (ObjectDoesNotExist, ValueError) as e:
+        logger.error(f"Error in get_current_project: {str(e)}")
+        return None
+    except Exception as e:
+        logger.error(f"Unexpected error in get_current_project: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return None
+
 def parse_parameters(parameter_string):
     """
     Parses a parameter string from a Django field definition.
@@ -726,3 +810,82 @@ def apply_unified_diff(original_lines: list, diff: str) -> list:
     except Exception as e:
         logger.exception(f"Failed to apply unified diff: {e}")
         return original_lines
+
+async def chunk_api_request(files_data, max_tokens=32000):
+    """Split large API requests into manageable chunks"""
+    chunks = []
+    current_chunk = {}
+    current_tokens = 0
+    
+    # Estimate tokens (rough approximation)
+    def estimate_tokens(text):
+        # Rough estimate: 1 token ≈ 4 characters
+        return len(str(text)) // 4
+    
+    for file_path, file_data in files_data.items():
+        # Estimate tokens for this file
+        file_tokens = estimate_tokens(file_data)
+        
+        # If this file alone exceeds max tokens, split it
+        if file_tokens > max_tokens:
+            # Split file content into chunks
+            content = file_data['original_content']
+            chunk_size = (max_tokens * 4) - 1000  # Leave room for metadata
+            content_chunks = [content[i:i + chunk_size] 
+                            for i in range(0, len(content), chunk_size)]
+            
+            # Create separate chunk for each part
+            for i, content_part in enumerate(content_chunks):
+                chunk_data = {
+                    file_path: {
+                        **file_data,
+                        'original_content': content_part,
+                        'is_chunk': True,
+                        'chunk_index': i,
+                        'total_chunks': len(content_chunks)
+                    }
+                }
+                chunks.append({'files': chunk_data})
+        
+        # If adding this file would exceed max tokens, start new chunk
+        elif current_tokens + file_tokens > max_tokens:
+            if current_chunk:
+                chunks.append({'files': current_chunk})
+            current_chunk = {file_path: file_data}
+            current_tokens = file_tokens
+        
+        # Add to current chunk
+        else:
+            current_chunk[file_path] = file_data
+            current_tokens += file_tokens
+    
+    # Add final chunk if not empty
+    if current_chunk:
+        chunks.append({'files': current_chunk})
+    
+    return chunks
+
+async def process_chunked_response(chunks):
+    """Process and combine chunked responses"""
+    combined_files = {}
+    
+    for chunk in chunks:
+        if not isinstance(chunk, dict) or 'files' not in chunk:
+            continue
+            
+        chunk_files = chunk.get('files', {})
+        for file_path, content in chunk_files.items():
+            if isinstance(content, dict) and content.get('is_chunk'):
+                # Handle chunked file
+                if file_path not in combined_files:
+                    combined_files[file_path] = ''
+                chunk_index = content.get('chunk_index', 0)
+                if chunk_index == 0:
+                    combined_files[file_path] = content['original_content']
+                else:
+                    combined_files[file_path] += content['original_content']
+            else:
+                # Handle regular file
+                combined_files[file_path] = content
+    
+    return {'files': combined_files}

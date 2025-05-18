@@ -13,4 +13,6 @@ if __name__ == "__main__":
         # …but then re-include only migrations under dynamic_apps
         reload_includes=["dynamic_apps/*/migrations/*.py"],
         lifespan="on",
+        log_level="info",
+        workers=1
     )

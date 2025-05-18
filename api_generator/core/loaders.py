@@ -15,15 +15,24 @@ class DatabaseLoader(Loader):
     def get_template_sources(self, template_name):
         """Get template source with proper error handling"""
         try:
-            tf = TemplateFile.objects.get(path=template_name)
-            yield Origin(
-                name=f"db://{template_name}",
-                template_name=template_name,
-                loader=self
-            )
-        except TemplateFile.DoesNotExist:
-            logger.warning(f"Template not found in database: {template_name}")
-            return
+            # First try exact path match
+            tf = TemplateFile.objects.filter(path=template_name).first()
+            
+            if not tf:
+                # Try with templates/ prefix if not found
+                prefixed_path = f"templates/{template_name}"
+                tf = TemplateFile.objects.filter(path=prefixed_path).first()
+            
+            if tf:
+                yield Origin(
+                    name=f"db://{template_name}",
+                    template_name=template_name,
+                    loader=self
+                )
+            else:
+                logger.warning(f"Template not found in database: {template_name}")
+                return
+                
         except Exception as e:
             logger.error(f"Error loading template {template_name}: {str(e)}")
             return
@@ -46,13 +55,22 @@ class DatabaseLoader(Loader):
                     self.validate_template(patched, origin.template_name)
                     return patched
 
-            # Get from database
-            tf = TemplateFile.objects.get(path=origin.template_name)
-            content = tf.content or ""
+            # Try exact path match first
+            tf = TemplateFile.objects.filter(path=origin.template_name).first()
             
-            # Validate template syntax
-            self.validate_template(content, origin.template_name)
-            return content
+            if not tf:
+                # Try with templates/ prefix if not found
+                prefixed_path = f"templates/{origin.template_name}"
+                tf = TemplateFile.objects.filter(path=prefixed_path).first()
+            
+            if tf:
+                content = tf.content or ""
+                # Validate template syntax
+                self.validate_template(content, origin.template_name)
+                return content
+            else:
+                logger.error(f"Template not found: {origin.template_name}")
+                raise TemplateDoesNotExist(f"Template {origin.template_name} does not exist")
 
         except TemplateFile.DoesNotExist:
             logger.error(f"Template not found: {origin.template_name}")

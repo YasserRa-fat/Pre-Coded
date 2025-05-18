@@ -1,5 +1,5 @@
 import axios from 'axios';
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import './css/DiffModal.css';
 
 // Improved syntax highlighting function
@@ -167,6 +167,61 @@ export default function DiffModal({
   const [afterError, setAfterError] = useState(null);
   const [selectedFileIndex, setSelectedFileIndex] = useState(0);
   const [viewMode, setViewMode] = useState('code'); // 'code' or 'preview'
+  const [isProcessing, setIsProcessing] = useState(false);
+  const modalRef = useRef(null);
+
+  // Prevent accidental closing during processing
+  const handleClose = useCallback(() => {
+    if (isProcessing) {
+      if (window.confirm('Changes are still being processed. Are you sure you want to close?')) {
+        onClose();
+      }
+    } else {
+      onClose();
+    }
+  }, [isProcessing, onClose]);
+
+  // Handle escape key
+  useEffect(() => {
+    const handleEscape = (e) => {
+      if (e.key === 'Escape') {
+        handleClose();
+      }
+    };
+    
+    window.addEventListener('keydown', handleEscape);
+    return () => window.removeEventListener('keydown', handleEscape);
+  }, [handleClose]);
+
+  // Handle click outside modal
+  useEffect(() => {
+    const handleClickOutside = (e) => {
+      if (modalRef.current && !modalRef.current.contains(e.target)) {
+        handleClose();
+      }
+    };
+    
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [handleClose]);
+
+  const handleApply = useCallback(async () => {
+    try {
+      setIsProcessing(true);
+      await onApply();
+    } finally {
+      setIsProcessing(false);
+    }
+  }, [onApply]);
+
+  const handleCancel = useCallback(async () => {
+    try {
+      setIsProcessing(true);
+      await onCancel();
+    } finally {
+      setIsProcessing(false);
+    }
+  }, [onCancel]);
 
   // Fetch the two preview URLs on mount
   useEffect(() => {
@@ -311,11 +366,17 @@ export default function DiffModal({
   };
 
   return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="diff-modal modal-content xlarge-modal" onClick={e => e.stopPropagation()}>
+    <div className="modal-overlay">
+      <div ref={modalRef} className="diff-modal modal-content xlarge-modal" onClick={e => e.stopPropagation()}>
         <div className="modal-header">
           <h3>Preview Changes</h3>
-          <button className="close-btn" onClick={onClose}>×</button>
+          <button 
+            className="close-btn" 
+            onClick={handleClose}
+            disabled={isProcessing}
+          >
+            ×
+          </button>
         </div>
 
         <div className="view-mode-toggle">
@@ -342,9 +403,28 @@ export default function DiffModal({
         </div>
 
         <div className="modal-footer">
-          <button className="primary-btn" onClick={onApply}>Apply Changes</button>
-          <button className="secondary-btn" onClick={onCancel}>Discard Changes</button>
+          <button 
+            className="primary-btn" 
+            onClick={handleApply}
+            disabled={isProcessing}
+          >
+            {isProcessing ? 'Applying...' : 'Apply Changes'}
+          </button>
+          <button 
+            className="secondary-btn" 
+            onClick={handleCancel}
+            disabled={isProcessing}
+          >
+            {isProcessing ? 'Canceling...' : 'Discard Changes'}
+          </button>
         </div>
+
+        {isProcessing && (
+          <div className="processing-overlay">
+            <div className="processing-spinner"></div>
+            <p>Processing changes...</p>
+          </div>
+        )}
       </div>
     </div>
   );

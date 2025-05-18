@@ -37,37 +37,25 @@ export default function ProjectDetail() {
   }, [projectId]);
 
   // Handle AI diff payload
-  const handleDiff = ({ files, previewMap, change_id, beforeMap, afterMap }) => {
+  const handleDiff = ({ files, previewMap, change_id }) => {
     console.log('ProjectDetail received diff data:', { files, previewMap, change_id });
     
-    // Files can now be either an array of formatted objects or an array of strings
-    const formatted = Array.isArray(files)
-      ? files.map(file => {
-          // If it's already a formatted object, use it directly
-          if (typeof file === 'object' && file.filePath) {
-            return file;
-          }
-          
-          // Otherwise, format it (legacy format)
-          const path = typeof file === 'string' ? file : '';
-          return {
-            filePath: path.replace(/^templates\//, ''),
-            fullPath: path,
-            before: beforeMap?.[path] || '',
-            after: afterMap?.[path] || beforeMap?.[path] || '',
-            projectId,
-            changeId: change_id,
-          };
-        })
-      : [];
-
-    if (!formatted.length) {
-      console.error('No files to show in diff modal');
-      return;
+    if (!files || !files.length) {
+        console.error('No files to show in diff modal');
+        return;
     }
+
+    // Ensure we have all required data
+    const formattedFiles = files.map(file => ({
+        ...file,
+        projectId: projectId,
+        changeId: change_id
+    }));
+
+    console.log('Setting diff modal with formatted files:', formattedFiles);
     
-    console.log('Setting diff modal with formatted files:', formatted);
-    setAiDiffFiles(formatted);
+    // Update state in a single batch to avoid race conditions
+    setAiDiffFiles(formattedFiles);
     setPreviewMap(previewMap || {});
     setChangeId(change_id);
     setModalOpen(true);

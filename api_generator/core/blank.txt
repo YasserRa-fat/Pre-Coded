@@ -1,7 +1,4 @@
-import django
-if not django.apps.apps.ready:
-    django.setup()from core.startup import run_preview_test
-from create_api.models import AIChangeRequest
-from core.startup import run_preview_test
-change = AIChangeRequest.objects.first()
-run_preview_test(change)
+   python test_template_loader.py 1
+   python test_asgi_websocket.py 1
+   python test_asgi_template_loader.py 1
+   python debug_asgi_middleware.py 1

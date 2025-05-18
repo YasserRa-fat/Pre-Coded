@@ -32,13 +32,14 @@
 
     <div id="gtco-main">
       <div class="container">
-        {% if request.user.is_authenticated %}
+        {% if request.user.is_authenticated and project_id %}
         <!-- Analytics Section -->
         <div class="row row-pb-md">
           <div class="col-md-12">
             <div class="analytics-box animate-box" data-animate-effect="fadeIn">
               <h3>Your Post Interactions</h3>
               <div id="interactionsChart" style="height: 300px;"></div>
+              <div id="chartError" class="alert alert-danger" style="display: none;"></div>
             </div>
           </div>
         </div>
@@ -61,35 +62,47 @@
                 <a href="{% url 'detail' p.id %}" class="post-meta">{{p.user}} <span class="date-posted">{{p.created_at}}</span></a>
               </li>
               {% endfor %}
+              {% else %}
+              <li class="col-md-12">
+                <div class="alert alert-info">No posts found.</div>
+              </li>
               {% endif %}
             </ul>
           </div>
         </div>
 
         <!-- Pagination -->
+        {% if posts.has_other_pages %}
         <div class="row">
           <div class="col-md-12 text-center">
             <nav aria-label="Page navigation">
               <ul class="pagination">
+                {% if posts.has_previous %}
                 <li>
-                  <a href="#" aria-label="Previous">
+                  <a href="?page={{ posts.previous_page_number }}" aria-label="Previous">
                     <span aria-hidden="true">&laquo;</span>
                   </a>
                 </li>
-                <li class="active"><a href="#">1</a></li>
-                <li><a href="#">2</a></li>
-                <li><a href="#">3</a></li>
-                <li><a href="#">4</a></li>
-                <li><a href="#">5</a></li>
+                {% endif %}
+                
+                {% for i in posts.paginator.page_range %}
+                <li {% if posts.number == i %}class="active"{% endif %}>
+                  <a href="?page={{ i }}">{{ i }}</a>
+                </li>
+                {% endfor %}
+                
+                {% if posts.has_next %}
                 <li>
-                  <a href="#" aria-label="Next">
+                  <a href="?page={{ posts.next_page_number }}" aria-label="Next">
                     <span aria-hidden="true">&raquo;</span>
                   </a>
                 </li>
+                {% endif %}
               </ul>
             </nav>
           </div>
         </div>
+        {% endif %}
       </div>
     </div>
 
@@ -104,23 +117,98 @@
   
   <script>
     document.addEventListener('DOMContentLoaded', function() {
-      {% if request.user.is_authenticated %}
-        // Fetch analytics data
-        fetch('/api/analytics/interactions/?days=10', {
-          headers: {
-            'Authorization': 'Bearer ' + localStorage.getItem('token')
+      {% if request.user.is_authenticated and project_id %}
+        let chart = null;
+        const projectId = '{{ project_id }}';
+        const chartErrorDiv = document.getElementById('chartError');
+        
+        function showError(message) {
+          if (chartErrorDiv) {
+            chartErrorDiv.textContent = message;
+            chartErrorDiv.style.display = 'block';
           }
-        })
-        .then(response => response.json())
-        .then(data => {
+        }
+        
+        function hideError() {
+          if (chartErrorDiv) {
+            chartErrorDiv.style.display = 'none';
+          }
+        }
+        
+        // Initialize WebSocket connection
+        const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${wsProtocol}//${window.location.host}/ws/project/${projectId}/`;
+        let ws = null;
+        let reconnectAttempts = 0;
+        const maxReconnectAttempts = 3;
+        
+        function connectWebSocket() {
+          if (reconnectAttempts >= maxReconnectAttempts) {
+            showError('Unable to connect to analytics service. Please refresh the page to try again.');
+            return;
+          }
+          
+          ws = new WebSocket(wsUrl);
+
+          ws.onopen = function() {
+            console.log('WebSocket connected');
+            hideError();
+            reconnectAttempts = 0;
+            // Request initial analytics data
+            ws.send(JSON.stringify({
+              type: 'get_analytics'
+            }));
+          };
+
+          ws.onmessage = function(e) {
+            try {
+              const data = JSON.parse(e.data);
+              
+              if (data.type === 'analytics_update') {
+                hideError();
+                updateChart(data.labels, data.data);
+              } else if (data.type === 'error') {
+                showError('Error updating analytics: ' + data.message);
+              }
+            } catch (error) {
+              console.error('Error processing message:', error);
+              showError('Error processing analytics data');
+            }
+          };
+
+          ws.onerror = function(e) {
+            console.error('WebSocket error:', e);
+            showError('Error connecting to analytics service');
+          };
+
+          ws.onclose = function() {
+            console.log('WebSocket disconnected');
+            reconnectAttempts++;
+            
+            // Attempt to reconnect after a delay
+            setTimeout(function() {
+              if (reconnectAttempts < maxReconnectAttempts) {
+                console.log(`Reconnecting... Attempt ${reconnectAttempts + 1}`);
+                connectWebSocket();
+              }
+            }, 3000);
+          };
+        }
+
+        function updateChart(labels, data) {
           const ctx = document.getElementById('interactionsChart').getContext('2d');
-          new Chart(ctx, {
+          
+          if (chart) {
+            chart.destroy();
+          }
+          
+          chart = new Chart(ctx, {
             type: 'line',
             data: {
-              labels: data.dates,
+              labels: labels,
               datasets: [{
                 label: 'Comments on Your Posts',
-                data: data.counts,
+                data: data,
                 borderColor: '#2D3001',
                 backgroundColor: 'rgba(45, 48, 1, 0.1)',
                 tension: 0.4,
@@ -149,11 +237,10 @@
               }
             }
           });
-        })
-        .catch(error => {
-          console.error('Error fetching analytics:', error);
-          document.getElementById('interactionsChart').innerHTML = 'Error loading analytics data';
-        });
+        }
+        
+        // Start WebSocket connection
+        connectWebSocket();
       {% endif %}
     });
   </script>
