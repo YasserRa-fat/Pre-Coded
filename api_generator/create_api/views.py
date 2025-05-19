@@ -1836,38 +1836,44 @@ def apply_changes_to_project(project_id, change_id):
     
     with transaction.atomic():
         for path, content in diff.items():
-            # Determine file type and app
-            parts = path.split('/')
-            app = None
-            if len(parts) > 1 and parts[0] in App.objects.filter(project_id=project_id).values_list('name', flat=True):
-                app_name_from_path = parts[0]
-                app = App.objects.get(project_id=project_id, name=app_name_from_path)
-                rel_path = '/'.join(parts[1:])
+            # Normalize template paths
+            if path.startswith('templates/'):
+                path = path.replace('templates/', '', 1)
+                file_type = 'template'
             else:
-                rel_path = path
+                # Determine file type and app
+                parts = path.split('/')
+                file_type = None
+                if len(parts) > 1 and parts[0] in App.objects.filter(project_id=project_id).values_list('name', flat=True):
+                    app_name_from_path = parts[0]
+                    app = App.objects.get(project_id=project_id, name=app_name_from_path)
+                    rel_path = '/'.join(parts[1:])
+                else:
+                    rel_path = path
+                    
+                # Match file type
+                for type_key, model_class in file_models.items():
+                    if change.file_type == type_key or path.endswith(('.py', '.html', '.css', '.js')):
+                        file_type = type_key
+                        break
             
-            # Match file type
-            model = None
-            for file_type, model_class in file_models.items():
-                if change.file_type == file_type or path.endswith(('.py', '.html', '.css', '.js')):
-                    model = model_class
-                    break
-            
-            if not model:
-                model = AppFile  # Fallback to AppFile for unknown types
+            model = file_models.get(file_type, AppFile)  # Fallback to AppFile for unknown types
             
             # Update or create file
             defaults = {'content': content, 'project_id': project_id}
             if app:
                 defaults['app'] = app
             
-            model.objects.update_or_create(
-                project_id=project_id,
-                path=rel_path,
-                app=app,
-                defaults=defaults
-            )
-            logger.debug(f"Saved {model.__name__}: {path}")
+            try:
+                obj = model.objects.update_or_create(
+                    project_id=project_id,
+                    path=path,
+                    defaults=defaults
+                )[0]
+                logger.debug(f"Saved {model.__name__}: {path}")
+            except Exception as e:
+                logger.error(f"Error saving {path}: {str(e)}")
+                continue
         
         # Mark change as applied
         change.status = 'applied'

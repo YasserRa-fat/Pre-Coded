@@ -118,13 +118,21 @@ class FileIndexer:
             # Index all file types
             for model in (TemplateFile, ModelFile, ViewFile, FormFile, AppFile, ProjectFile, StaticFile):
                 logger.debug(f"Indexing {model.__name__} files")
-                qs = model.objects.filter(project_id=project_id)
+                # Always use the default DB for create_api models
+                qs = model.objects.using('default').filter(project_id=project_id)
                 for f in qs:
                     # Get base path and normalize
                     base_path = cls._normalize_path(f.path)
                     
-                    # Get app name if available
-                    app_name = f.app.name if hasattr(f, 'app') and f.app else None
+                    # Get app name if available, always from default DB
+                    app_name = None
+                    if hasattr(f, 'app_id') and f.app_id:
+                        from create_api.models import App
+                        try:
+                            app_obj = App.objects.using('default').get(id=f.app_id)
+                            app_name = app_obj.name
+                        except Exception:
+                            app_name = None
                     
                     # Generate canonical path based on file type
                     if model.__name__ == 'TemplateFile' and not base_path.startswith('templates/'):

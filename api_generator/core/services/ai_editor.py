@@ -16,6 +16,7 @@ import traceback
 import random
 from core.services.code_validator import DjangoCodeValidator
 from core.services.ai_editor_fixed import make_ai_api_call as call_ai_api_async
+from .json_validator import JSONValidator
 logger = logging.getLogger(__name__)
 from create_api.models import (
     AIChangeRequest,
@@ -34,58 +35,48 @@ import string
 from pathlib import Path
 from django.conf import settings
 from .file_indexer import FileIndexer
-
+from .ai_api_client import make_ai_api_call
 TOGETHER_API_KEY = os.getenv("TOGETHER_AI_API_KEY")
 MISTRAL_MODEL    = "mistralai/Mixtral-8x7B-Instruct-v0.1"
 API_URL          = "https://api.together.xyz/inference"
-
 # Cache timeouts
 CACHE_TIMEOUT = 60 * 5  # 5 minutes
 CHAT_CACHE_TIMEOUT = 60 * 30  # 30 minutes
 
 # Shorter prompts for faster responses
-SYSTEM_PROMPT = """You are a Django AI assistant. Analyze the request and generate necessary file changes for the project stored in the database.
+SYSTEM_PROMPT = r"""You are a Django AI assistant. Analyze the request and generate necessary file changes for the project stored in the database.
 Your task is to:
 1. Identify all files that need to be modified or created based on the user's request
 2. Generate complete, working code changes for each file
 3. Return a JSON object with all changes
 
-The changes should be returned in this format:
-{{
-    "files": {{
+CRITICAL: YOU MUST RETURN ONLY A VALID JSON OBJECT WITH THIS EXACT STRUCTURE:
+{
+    "files": {
         "path/to/file1": "complete file content with changes",
         "path/to/file2": "complete file content with changes"
-    }},
+    },
     "description": "Brief description of changes made",
-    "dependencies": {{
+    "dependencies": {
         "python": ["package1", "package2"],
         "js": ["package1", "package2"]
-    }}
-}}
+    }
+}
+
+FORMATTING RULES:
+1. DO NOT include any explanatory text before or after the JSON
+2. DO NOT use backticks (`) for code blocks - use proper JSON string escaping
+3. DO NOT use comments in the code - include them as part of the string content
+4. ALL file paths must match the database structure exactly
+5. Template files should be just the filename (e.g. "feed.html" not "templates/feed.html")
+6. Static files must include full path (e.g. "static/js/script.js")
 
 Project: {project_name}
 App: {app_name}
 Available Files: {file_list}
 Request: {user_message}
 
-Important:
-1. The project is a standard Django project (not DRF)
-2. All file paths should match the database structure (models/, views/, templates/, etc.)
-3. Generate complete file contents with your changes, not just the changes
-4. Include all necessary imports and dependencies
-5. Ensure template changes include proper template inheritance
-6. Make sure view changes include proper context data
-7. Add any new URL patterns needed
-8. Include any new static files required
-9. NEVER respond with explanations or chat messages - ONLY GENERATE CODE CHANGES
-10. ALWAYS return a valid JSON response with the "files" field containing your changes
-11. If the request is unclear, still attempt to generate code changes rather than asking for clarification
-12. ALWAYS use forward slashes (/) in file paths, NEVER use backslashes (\)
-
-Do not use placeholders or '...'.
-Generate complete, working code that can be directly used.
-REMEMBER: This is for code generation only. Do not respond conversationally.
-"""
+Remember: Return ONLY the JSON object, no other text."""
 
 SYSTEM_CHAT_PROMPT = """You are a friendly Django expert assistant. 
 Your role is to help users with their Django project by answering questions and providing guidance.
@@ -100,143 +91,161 @@ Otherwise, provide helpful explanations in plain English.
 """
 
 REFINE_PROMPT = r"""You are a Django request analyzer. Your task is to break down the user's request into specific file changes needed.
-Return a JSON object in this format:
-{{{{
+
+CRITICAL: YOU MUST RETURN ONLY A VALID JSON OBJECT WITH THIS EXACT STRUCTURE:
+{
     "refined_request": "Clear description of what needs to be done",
-    "file_types": {{{{
+    "file_types": {
         "template": ["Description of template changes needed"],
         "view": ["Description of view changes needed"],
         "model": ["Description of model changes needed"],
         "static": ["Description of static file changes needed"],
         "url": ["Description of URL changes needed"]
-    }}}}
-}}}}
+    }
+}
+
+FORMATTING RULES:
+1. DO NOT include any explanatory text before or after the JSON
+2. DO NOT use backticks (`) or any other code block markers
+3. ALL descriptions must be clear and specific
+4. If a file type needs no changes, include an empty array
+5. The refined_request must be a single clear sentence
 
 Request: {user_message}
 Project: {project_name}
 App: {app_name}
 
-IMPORTANT: Always use forward slashes (/) in file paths, never use backslashes (\).
-"""
+Remember: Return ONLY the JSON object, no other text."""
 
 TEMPLATE_PROMPT_STAGE1 = r"""You are a Django template expert. Select template files that need to be modified based on this request.
-Return a JSON object with ONLY the file paths that need to be modified:
-{{{{
-    "selected_files": ["templates/path/to/file1.html", "templates/path/to/file2.html"]
-}}}}
 
-IMPORTANT INSTRUCTIONS:
-1. YOU decide which template files are most relevant to the request
-2. ONLY include files that actually need to be modified to fulfill the request
-3. Your response MUST be in valid JSON format with the exact structure shown above
-4. Return ONLY the file paths, not their content
-5. ALWAYS use forward slashes (/) in file paths, NEVER use backslashes (\)
-6. Use full paths including directory prefixes like 'templates/'
+CRITICAL: YOU MUST RETURN ONLY A VALID JSON OBJECT WITH THIS EXACT STRUCTURE:
+{
+    "selected_files": ["file1.html", "file2.html"]
+}
+
+FORMATTING RULES:
+1. DO NOT include any explanatory text before or after the JSON
+2. Template files must be filenames only, no paths
+3. Files must exist in the available files list
+4. Return empty array if no files need changes
+5. DO NOT include 'templates/' prefix
 
 Request: {refined_request}
 Available template files:
 {file_list}
-"""
+
+Remember: Return ONLY the JSON object, no other text."""
 
 TEMPLATE_PROMPT_STAGE2 = r"""You are a Django template expert. Generate template file changes based on this request.
-Return a JSON object with template file changes for the files you previously selected:
-{{{{
-    "files": {{{{
-        "templates/path/to/file1.html": "complete template content",
-        "templates/path/to/file2.html": "complete template content"
-    }}}}
-}}}}
 
-IMPORTANT INSTRUCTIONS:
-1. Your response MUST be in valid JSON format with the exact structure shown above
-2. Put actual HTML code inside the file content strings
-3. Make sure to escape any quotes in the HTML code
-4. Include complete file content, not just the changes
-5. Use EXACTLY the same paths that you selected in the previous step
-6. ALWAYS use forward slashes (/) in file paths, NEVER use backslashes (\)
+CRITICAL: YOU MUST RETURN ONLY A VALID JSON OBJECT WITH THIS EXACT STRUCTURE:
+{
+    "files": {
+        "file1.html": "complete template content",
+        "file2.html": "complete template content"
+    }
+}
+
+FORMATTING RULES:
+1. DO NOT include any explanatory text before or after the JSON
+2. Use proper JSON string escaping for all content
+3. Include complete file content, not just changes
+4. Use EXACTLY the same filenames selected in stage 1
+5. DO NOT use backticks (`) or any other code block markers
+6. Template content must be valid Django template syntax
 
 Request: {refined_request}
 Selected files with their content:
 {selected_files_content}
-"""
+
+Remember: Return ONLY the JSON object, no other text."""
 
 VIEW_PROMPT_STAGE1 = r"""You are a Django view expert. Select view files that need to be modified based on this request.
-Return a JSON object with ONLY the file paths that need to be modified:
-{{{{
-    "selected_files": ["views/path/to/file1.py", "views/path/to/file2.py"]
-}}}}
 
-IMPORTANT INSTRUCTIONS:
-1. YOU decide which view files are most relevant to the request
-2. ONLY include files that actually need to be modified to fulfill the request
-3. Your response MUST be in valid JSON format with the exact structure shown above
-4. Return ONLY the file paths, not their content
-5. ALWAYS use forward slashes (/) in file paths, NEVER use backslashes (\)
-6. Use full paths including directory prefixes like 'views/'
+CRITICAL: YOU MUST RETURN ONLY A VALID JSON OBJECT WITH THIS EXACT STRUCTURE:
+{
+    "selected_files": ["views/path/to/file1.py", "views/path/to/file2.py"]
+}
+
+FORMATTING RULES:
+1. DO NOT include any explanatory text before or after the JSON
+2. View files must include full path from views/
+3. Files must exist in the available files list
+4. Return empty array if no files need changes
 
 Request: {refined_request}
 Available view files:
 {file_list}
-"""
+
+Remember: Return ONLY the JSON object, no other text."""
 
 VIEW_PROMPT_STAGE2 = r"""You are a Django view expert. Generate view file changes based on this request.
-Return a JSON object with view file changes for the files you previously selected:
-{{{{
-    "files": {{{{
+
+CRITICAL: YOU MUST RETURN ONLY A VALID JSON OBJECT WITH THIS EXACT STRUCTURE:
+{
+    "files": {
         "views/path/to/file1.py": "complete view content",
         "views/path/to/file2.py": "complete view content"
-    }}}}
-}}}}
+    }
+}
 
-IMPORTANT INSTRUCTIONS:
-1. Your response MUST be in valid JSON format with the exact structure shown above
-2. Include all necessary imports and complete view code
-3. Make sure to escape any quotes in the Python code
-4. Include complete file content, not just the changes
+FORMATTING RULES:
+1. DO NOT include any explanatory text before or after the JSON
+2. Use proper JSON string escaping for all content
+3. Include complete file content with all imports
+4. Use EXACTLY the same paths selected in stage 1
+5. DO NOT use backticks (`) or any other code block markers
+6. View content must be valid Python syntax
 
 Request: {refined_request}
 Selected files with their content:
 {selected_files_content}
-"""
+
+Remember: Return ONLY the JSON object, no other text."""
 
 MODEL_PROMPT_STAGE1 = r"""You are a Django model expert. Select model files that need to be modified based on this request.
-Return a JSON object with ONLY the file paths that need to be modified:
-{{{{
-    "selected_files": ["models/path/to/file1.py", "models/path/to/file2.py"]
-}}}}
 
-IMPORTANT INSTRUCTIONS:
-1. YOU decide which model files are most relevant to the request
-2. ONLY include files that actually need to be modified to fulfill the request
-3. Your response MUST be in valid JSON format with the exact structure shown above
-4. Return ONLY the file paths, not their content
-5. ALWAYS use forward slashes (/) in file paths, NEVER use backslashes (\)
-6. Use full paths including directory prefixes like 'models/'
+CRITICAL: YOU MUST RETURN ONLY A VALID JSON OBJECT WITH THIS EXACT STRUCTURE:
+{
+    "selected_files": ["models/path/to/file1.py", "models/path/to/file2.py"]
+}
+
+FORMATTING RULES:
+1. DO NOT include any explanatory text before or after the JSON
+2. Model files must include full path from models/
+3. Files must exist in the available files list
+4. Return empty array if no files need changes
 
 Request: {refined_request}
 Available model files:
 {file_list}
-"""
+
+Remember: Return ONLY the JSON object, no other text."""
 
 MODEL_PROMPT_STAGE2 = r"""You are a Django model expert. Generate model file changes based on this request.
-Return a JSON object with model file changes for the files you previously selected:
-{{{{
-    "files": {{{{
+
+CRITICAL: YOU MUST RETURN ONLY A VALID JSON OBJECT WITH THIS EXACT STRUCTURE:
+{
+    "files": {
         "models/path/to/file1.py": "complete model content",
         "models/path/to/file2.py": "complete model content"
-    }}}}
-}}}}
+    }
+}
 
-IMPORTANT INSTRUCTIONS:
-1. Your response MUST be in valid JSON format with the exact structure shown above
-2. Include all necessary imports and complete model code
-3. Make sure to escape any quotes in the Python code
-4. Include complete file content, not just the changes
+FORMATTING RULES:
+1. DO NOT include any explanatory text before or after the JSON
+2. Use proper JSON string escaping for all content
+3. Include complete file content with all imports
+4. Use EXACTLY the same paths selected in stage 1
+5. DO NOT use backticks (`) or any other code block markers
+6. Model content must be valid Python syntax
 
 Request: {refined_request}
 Selected files with their content:
 {selected_files_content}
-"""
+
+Remember: Return ONLY the JSON object, no other text."""
 
 FORM_PROMPT_STAGE1 = r"""You are a Django form expert. Select form files that need to be modified based on this request.
 Return a JSON object with ONLY the file paths that need to be modified:
@@ -277,48 +286,47 @@ Selected files with their content:
 
 # Add the static file prompts
 STATIC_PROMPT_STAGE1 = r"""You are a Django static files expert. Select static files that need to be modified based on this request.
-Return a JSON object with ONLY the file paths that need to be modified:
-{{{{
-    "selected_files": ["static/path/to/file.js", "static/path/to/file.css"]
-}}}}
 
-IMPORTANT INSTRUCTIONS:
-1. YOU decide which static files are most relevant to the request
-2. ONLY include files that actually need to be modified to fulfill the request
-3. Your response MUST be in valid JSON format with the exact structure shown above
-4. Return ONLY the file paths, not their content
+CRITICAL: YOU MUST RETURN ONLY A VALID JSON OBJECT WITH THIS EXACT STRUCTURE:
+{
+    "selected_files": ["static/path/to/file1.js", "static/path/to/file2.css"]
+}
+
+FORMATTING RULES:
+1. DO NOT include any explanatory text before or after the JSON
+2. Static files must include full path from static/
+3. Files must exist in the available files list
+4. Return empty array if no files need changes
 
 Request: {refined_request}
 Available static files:
 {file_list}
-"""
+
+Remember: Return ONLY the JSON object, no other text."""
 
 STATIC_PROMPT_STAGE2 = r"""You are a Django static files expert. Generate static file changes based on this request.
-Return a JSON object with ONLY static file changes:
-{{{{
-    "files": {{{{
-        "static/path/to/file.js": "complete JS content",
-        "static/path/to/file.css": "complete CSS content"
-    }}}}
-}}}}
 
-IMPORTANT FORMATTING INSTRUCTIONS:
-1. Your response MUST be in valid JSON format with the exact structure shown above
-2. DO NOT include any explanations or notes outside the JSON structure
-3. Put actual code inside the file content strings
-4. Make sure to escape any quotes in the code
-5. Include complete file content, not just the changes
+CRITICAL: YOU MUST RETURN ONLY A VALID JSON OBJECT WITH THIS EXACT STRUCTURE:
+{
+    "files": {
+        "static/path/to/file1.js": "complete JS content",
+        "static/path/to/file2.css": "complete CSS content"
+    }
+}
 
-Important implementation guidelines:
-1. Include all necessary JS/CSS code
-2. Add proper event handlers and functions
-3. Handle data visualization if needed
-4. Ensure proper styling and responsiveness
+FORMATTING RULES:
+1. DO NOT include any explanatory text before or after the JSON
+2. Use proper JSON string escaping for all content
+3. Include complete file content, not just changes
+4. Use EXACTLY the same paths selected in stage 1
+5. DO NOT use backticks (`) or any other code block markers
+6. Content must be valid for the file type (JS/CSS)
 
 Request: {refined_request}
 Selected files with their content:
 {selected_files_content}
-"""
+
+Remember: Return ONLY the JSON object, no other text."""
 
 # Add debug constants
 DEBUG_REFINE = True
@@ -371,97 +379,104 @@ def normalize_path(path):
 
 async def call_ai(conversation, last_user_message, context_files):
     """Async version of AI API call with strict path handling"""
-    cache_key = f"ai_response_{conversation.id}_{hash(last_user_message)}"
-    cached_response = cache.get(cache_key)
-    if cached_response:
-        logger.debug("Using cached AI response")
-        return cached_response
-
-    history = await get_cached_conversation_history(conversation.id)
-    history.append(f"User: {last_user_message}")
-
-    # Normalize all file paths in context
-    normalized_context = {}
-    logger.debug("Normalizing file paths for AI context")
-    for path, content in context_files.items():
-        norm_path = normalize_path(path)
-        normalized_context[norm_path] = content
-        logger.debug(f"AI context path: {path} -> {norm_path}")
-
-    file_list = "\n".join(f"- {p}" for p in normalized_context.keys())
-    logger.debug(f"Available files for AI:\n{file_list}")
-
-    prompt = SYSTEM_PROMPT.format(
-        project_name=conversation.project.name,
-        app_name=conversation.app_name or "—",
-        file_list=file_list
-    )
-
-    # Add strict path instructions
-    prompt += "\nIMPORTANT: When selecting or referring to files:\n"
-    prompt += "1. Use EXACT paths from the list above\n"
-    prompt += "2. Always include the full path (e.g., 'templates/feed.html', not just 'feed.html')\n"
-    prompt += "3. Return paths in a JSON object with no additional text\n"
-    prompt += "4. Example: {'selected_files': ['templates/feed.html']}\n"
-
-    # Only include relevant files based on the message
-    relevant_files = {}
-    logger.debug("Filtering relevant files based on message keywords")
-    for path, content in normalized_context.items():
-        if any(keyword in last_user_message.lower() for keyword in path.lower().split('/')):
-            relevant_files[path] = get_cached_file_content(path, content)
-            logger.debug(f"Including relevant file: {path}")
-
-    for path, content in relevant_files.items():
-        prompt += f"```{path}\n{content}\n```\n\n"
-    prompt += "\n".join(history[-5:]) + "\nAssistant:"
-
-    logger.debug("Making AI API call")
-    async with aiohttp.ClientSession() as session:
-        async with session.post(
-            API_URL,
-            json={
-                "model": MISTRAL_MODEL,
-                "prompt": prompt,
-                "temperature": 0.2,
-                "max_tokens": 2048,
-                "top_p": 0.7,
-                "frequency_penalty": 0.5,
-            },
-            headers={"Authorization": f"Bearer {TOGETHER_API_KEY}"}
-        ) as response:
-            response.raise_for_status()
-            result = await response.json()
-            result = result["choices"][0]["text"].strip()
-            logger.debug("Received AI response")
-
-    # Validate and normalize paths in the response
     try:
-        logger.debug("Validating and normalizing paths in AI response")
-        response_data = json.loads(result)
-        if isinstance(response_data, dict):
-            # Normalize paths in selected_files
-            if 'selected_files' in response_data:
-                logger.debug(f"Original selected files: {response_data['selected_files']}")
-                response_data['selected_files'] = [
-                    normalize_path(p) for p in response_data['selected_files']
-                ]
-                logger.debug(f"Normalized selected files: {response_data['selected_files']}")
-            # Normalize paths in files dict
-            if 'files' in response_data:
-                logger.debug("Normalizing paths in files dictionary")
-                normalized_files = {}
-                for path, content in response_data['files'].items():
-                    norm_path = normalize_path(path)
-                    normalized_files[norm_path] = content
-                    logger.debug(f"Normalized file path: {path} -> {norm_path}")
-                response_data['files'] = normalized_files
-            result = json.dumps(response_data)
-    except json.JSONDecodeError:
-        logger.warning("AI response was not valid JSON")
+        cache_key = f"ai_response_{conversation.id}_{hash(last_user_message)}"
+        cached_response = cache.get(cache_key)
+        if cached_response:
+            return cached_response
 
-    cache.set(cache_key, result, CACHE_TIMEOUT)
-    return result
+        history = await get_cached_conversation_history(conversation.id)
+        history.append(f"User: {last_user_message}")
+
+        # Normalize all file paths in context
+        normalized_context = {}
+        logger.debug("Normalizing file paths for AI context")
+        for path, content in context_files.items():
+            norm_path = normalize_path(path)
+            normalized_context[norm_path] = content
+            logger.debug(f"AI context path: {path} -> {norm_path}")
+
+        file_list = "\n".join(f"- {p}" for p in normalized_context.keys())
+        logger.debug(f"Available files for AI:\n{file_list}")
+
+        prompt = SYSTEM_PROMPT.format(
+            project_name=conversation.project.name,
+            app_name=conversation.app_name or "—",
+            file_list=file_list
+        )
+
+        # Add strict path instructions
+        prompt += "\nCRITICAL: YOU MUST RETURN ONLY A VALID JSON OBJECT WITH NO ADDITIONAL TEXT.\n"
+        prompt += "\nFORMATTING RULES:\n"
+        prompt += "1. NO comments in the JSON\n"
+        prompt += "2. NO backticks or code blocks\n"
+        prompt += "3. Proper JSON string escaping\n"
+        prompt += "4. Template files use just filename\n"
+        prompt += "5. Static files use full path\n"
+        prompt += "6. NO explanatory text before or after JSON\n"
+
+        # Only include relevant files based on the message
+        relevant_files = {}
+        logger.debug("Filtering relevant files based on message keywords")
+        for path, content in normalized_context.items():
+            if any(keyword in last_user_message.lower() for keyword in path.lower().split('/')):
+                relevant_files[path] = get_cached_file_content(path, content)
+                logger.debug(f"Including relevant file: {path}")
+
+        for path, content in relevant_files.items():
+            prompt += f"\nFile: {path}\n{content}\n"
+        prompt += "\n".join(history[-5:]) + "\nAssistant:"
+
+        logger.debug("Making AI API call")
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                API_URL,
+                json={
+                    "model": MISTRAL_MODEL,
+                    "prompt": prompt,
+                    "temperature": 0.2,
+                    "max_tokens": 2048,
+                    "top_p": 0.7,
+                    "frequency_penalty": 0.5,
+                },
+                headers={"Authorization": f"Bearer {TOGETHER_API_KEY}"}
+            ) as response:
+                response.raise_for_status()
+                result = await response.json()
+                result = result["choices"][0]["text"].strip()
+                logger.debug("Received AI response")
+
+        # Validate and clean the response using the new JSONValidator
+        try:
+            logger.debug("Validating and cleaning AI response")
+            is_valid, cleaned_response, error_msg = JSONValidator.validate_and_parse(result)
+            
+            if is_valid and cleaned_response:
+                cache.set(cache_key, json.dumps(cleaned_response), CACHE_TIMEOUT)
+                return json.dumps(cleaned_response)
+            else:
+                logger.warning(f"JSON validation failed: {error_msg}")
+                # Try fallback regex extraction
+                extracted = JSONValidator.extract_json_with_regex(result)
+                if extracted:
+                    logger.info("Successfully extracted JSON data using regex fallback")
+                    cache.set(cache_key, json.dumps(extracted), CACHE_TIMEOUT)
+                    return json.dumps(extracted)
+        except Exception as e:
+            logger.error(f"Error cleaning AI response: {str(e)}")
+
+        return json.dumps({
+            "files": {},
+            "description": "Failed to parse AI response",
+            "dependencies": {"python": [], "js": []}
+        })
+    except Exception as e:
+        logger.error(f"Error in call_ai: {str(e)}")
+        return json.dumps({
+            "files": {},
+            "description": f"Error: {str(e)}",
+            "dependencies": {"python": [], "js": []}
+        })
 
 async def call_chat_ai(conversation, last_user_message, context_files=None):
     """Async version of chat AI call"""
@@ -651,664 +666,479 @@ async def refine_request(conversation, user_message) -> dict:
         logger.error(f"Error in refine_request: {str(e)}")
         return None
 
-async def make_ai_api_call(prompt: str, max_tokens: int = 2048) -> str:
-    """Make an async API call to the AI service with retry on rate limiting"""
-    max_retries = 3
-    base_retry_delay = 2  # start with 2 second delay
-    
-    # Safety check - ensure prompt is a string
-    if not isinstance(prompt, str):
-        raise ValueError(f"Prompt must be a string, got {type(prompt)}")
-    
-    # Pre-process prompt to handle Django template tags that could cause issues
+async def make_initial_ai_call(conversation, text, files_data):
+    """Make initial AI call with project context and file data"""
     try:
-        # Replace Django template tags with placeholders before sending to API
-        prompt = prompt.replace("{% csrf_token %}", "CSRF_TOKEN_PLACEHOLDER")
-        prompt = prompt.replace("{%", "DJANGO_TAG_START")
-        prompt = prompt.replace("%}", "DJANGO_TAG_END")
-    except Exception as e:
-        logger.error(f"Error preprocessing prompt: {str(e)}")
-        raise
-    
-    last_error = None
-    for attempt in range(max_retries):
-        try:
-            logger.info(f"Making API call attempt {attempt + 1}/{max_retries}")
-            
-            # Wait before each attempt to avoid rate limits
-            retry_delay = base_retry_delay * (attempt + 1)
-            await asyncio.sleep(retry_delay)
-            
-            headers = {"Authorization": f"Bearer {TOGETHER_API_KEY}"}
-            payload = {
-                "model": MISTRAL_MODEL,
-                "prompt": prompt,
-                "temperature": 0.2,
-                "max_tokens": max_tokens,
-                "top_p": 0.7,
-                "frequency_penalty": 0.5
-            }
-            
-            timeout = aiohttp.ClientTimeout(total=60)  # 60 second timeout
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.post(API_URL, json=payload, headers=headers) as response:
-                    if response.status == 429:  # Rate limited
-                        logger.warning(f"Rate limited by AI API (attempt {attempt + 1}/{max_retries})")
-                        if attempt < max_retries - 1:
-                            await asyncio.sleep(retry_delay)
-                            continue
-                        else:
-                            raise Exception("Max retries exceeded due to rate limiting")
-                    
-                    # Handle all non-2xx responses
-                    if response.status >= 400:
-                        error_text = await response.text()
-                        logger.error(f"API error {response.status}: {error_text}")
-                        last_error = f"API returned status code {response.status}: {error_text}"
-                        if attempt < max_retries - 1:
-                            continue
-                        raise Exception(last_error)
-                            
-                    result = await response.json()
-                    
-                    if not result.get("choices"):
-                        last_error = "Invalid response format from AI API"
-                        if attempt < max_retries - 1:
-                            continue
-                        raise Exception(last_error)
-                    
-                    # Post-process the result to restore Django template tags
-                    response_text = result["choices"][0]["text"]
-                    response_text = response_text.replace("CSRF_TOKEN_PLACEHOLDER", "{% csrf_token %}")
-                    response_text = response_text.replace("DJANGO_TAG_START", "{%")
-                    response_text = response_text.replace("DJANGO_TAG_END", "%}")
-                    
-                    return response_text
-                    
-        except asyncio.TimeoutError:
-            last_error = f"API call timed out (attempt {attempt + 1}/{max_retries})"
-            logger.error(last_error)
-            if attempt == max_retries - 1:
-                raise Exception(last_error)
-        except aiohttp.ClientError as e:
-            last_error = f"API request failed: {str(e)}"
-            logger.error(last_error)
-            if attempt == max_retries - 1:
-                raise Exception(last_error)
-        except Exception as e:
-            last_error = f"Error calling AI API: {str(e)}"
-            logger.error(last_error)
-            logger.error(traceback.format_exc())
-            if attempt == max_retries - 1:
-                raise
-            
-        # Wait before next retry
-        if attempt < max_retries - 1:
-            await asyncio.sleep(retry_delay)
-    
-    raise Exception(last_error or "Failed to get response from AI API after all retries")
-from django.db import connections
-
-def get_project_files(project_id):
-    files = {}
-    with connections['default'].cursor() as cursor:
-        # Template Files
-        cursor.execute("SELECT path, app_id FROM create_api_templatefile WHERE project_id = %s", [project_id])
-        for row in cursor.fetchall():
-            path = row[0]
-            app_id = row[1]
-            app_name = App.objects.get(id=app_id).name if app_id else None
-            files[f"templates/{path}"] = {'type': 'templates', 'app': app_name}
-        # Static Files
-        cursor.execute("SELECT path FROM create_api_staticfile WHERE project_id = %s", [project_id])
-        files.update({f"static/{row[0]}": {'type': 'static', 'app': None} for row in cursor.fetchall()})
-        # URL Files
-        cursor.execute("SELECT path, app_id FROM create_api_urlfile WHERE project_id = %s", [project_id])
-        for row in cursor.fetchall():
-            path = row[0]
-            app_id = row[1]
-            app_name = App.objects.get(id=app_id).name if app_id else None
-            files[f"urls/{path}"] = {'type': 'urls', 'app': app_name}
-    logger.info(f"Retrieved {len(files)} files for project {project_id}: {list(files.keys())}")
-    return files
-
-def validate_and_map_files(selected_files, project_files):
-    logger.debug("Validating and mapping selected files")
-    valid_files = []
-    for selected_path in selected_files:
-        logger.debug(f"Processing selected path: {selected_path}")
-        if selected_path in project_files:
-            valid_files.append(selected_path)
-            logger.debug(f"Found exact match for {selected_path}")
+        logger.info("Starting make_initial_ai_call")
+        logger.debug(f"Input - conversation: {conversation.id}, text length: {len(text)}")
+        logger.debug(f"Files data keys: {list(files_data.keys())}")
+        
+        # Extract the actual file structure for the AI
+        project_context = files_data.get('project_context', {})
+        project_id = files_data.get('project_id')
+        
+        # Log project_context structure for debugging
+        if project_context:
+            logger.debug(f"Project context contains {len(project_context)} entries")
+            sample_keys = list(project_context.keys())[:5]
+            logger.debug(f"Sample keys: {sample_keys}")
         else:
-            # Fallback: Match by filename
-            filename = os.path.basename(selected_path)
-            logger.debug(f"No exact match, trying to match by filename: {filename}")
-            matching_paths = [
-                path for path in project_files.keys()
-                if os.path.basename(path) == filename and project_files[path].get('type') == 'templates'
-            ]
-            if matching_paths:
-                valid_files.append(matching_paths[0])
-                logger.info(f"Mapped {selected_path} to {matching_paths[0]}")
-            else:
-                logger.warning(f"No matching file found for {selected_path}")
-    return valid_files
-def preprocess_django_template(template_content):
-    """Preprocess Django template content to replace template tags with placeholders"""
-    # Replace Django template tags with placeholders
-    processed = re.sub(r'{%\s+extends\s+[\'"](.+?)[\'"]', 'EXTENDS_BASE_TEMPLATE', template_content)
-    processed = re.sub(r'{%\s+block\s+(.+?)\s+%}', 'BLOCK_START_\\1', processed)
-    processed = re.sub(r'{%\s+endblock\s*%}', 'BLOCK_END', processed)
-    processed = re.sub(r'{%\s+csrf_token\s*%}', 'CSRF_TOKEN_PLACEHOLDER', processed)  
-    processed = re.sub(r'{{\s+(.+?)\s+}}', 'VAR_\\1', processed)
-    processed = re.sub(r'{%\s+(.+?)\s+%}', 'TAG_\\1', processed)
-    return processed
+            logger.warning("Project context is empty!")
+        
+        # Create the prompt with properly escaped JSON example
+        prompt = f"""
+You are a Django AI assistant. Analyze the request and generate necessary file changes.
+Project Context:
+- Project ID: {project_id}
+- App Name: {files_data.get('app_name')}
+- User Request: {text}
 
-def postprocess_django_template(template_content):
-    """Postprocess Django template content to restore template tags from placeholders"""
-    # Restore Django template tags from placeholders
-    processed = template_content.replace('EXTENDS_BASE_TEMPLATE', "{% extends 'base.html' %}")
-    processed = re.sub(r'BLOCK_START_(\w+)', r'{% block \1 %}', processed)
-    processed = re.sub(r'BLOCK_END', r'{% endblock %}', processed)
-    processed = re.sub(r'CSRF_TOKEN_PLACEHOLDER', r'{% csrf_token %}', processed)
-    processed = re.sub(r'VAR_(\w+)', r'{{ \1 }}', processed)
-    processed = re.sub(r'TAG_(\w+)', r'{% \1 %}', processed)
-    return processed
-async def generate_template_changes(refined_request, context, file_list, project_name, app_name, user_message):
-    """Generate template file changes for a given request."""
-    project_id = context.get('project_id')
-    cache_key = f"template_changes:{project_id}:{hash(user_message)}"
-    
-    # Check cache
-    cached_response = cache.get(cache_key)
-    if cached_response:
-        logger.info(f"Returning cached template changes for {cache_key}")
-        return cached_response
-
-    # Stage 1: Select relevant template files with explicit instructions
-    stage1_prompt = f"""
-You are a Django template expert. Select template files that need to be modified based on this request.
-Return a JSON object with ONLY the file paths that need to be modified, wrapped in delimiters:
----JSON_START---
-{{
-    "selected_files": ["templates/feed.html", "templates/base.html"]
-}}
----JSON_END---
-
-IMPORTANT INSTRUCTIONS:
-1. Select ONLY from the available template files listed below.
-2. Use the EXACT paths as provided (e.g., 'templates/feed.html'). Do NOT modify, shorten, or invent paths.
-3. If no files are relevant, return an empty array: {{"selected_files": []}}.
-4. Example: To modify the feed page, select 'templates/feed.html' if listed.
-5. Do NOT include app names in paths (e.g., do NOT select 'posts/templates/feed.html').
-
-Request: {user_message}
-Available template files:
-{file_list}
-"""
-    stage1_response = await call_ai_api_async(prompt=stage1_prompt, max_tokens=4096, temperature=0.2)
-    logger.debug(f"Raw Stage 1 response: {stage1_response}")
-
-    selected_files = []
-    project_files = context.get('files', {})
-
-    # Parse Stage 1 response
-    if stage1_response and isinstance(stage1_response, str):
-        try:
-            json_match = re.search(r'---JSON_START---\s*([\s\S]*?)\s*---JSON_END---', stage1_response)
-            if json_match:
-                stage1_data = json.loads(json_match.group(1))
-                selected_files = stage1_data.get('selected_files', [])
-            else:
-                logger.warning(f"No JSON delimiters found in Stage 1 response: {stage1_response}")
-        except json.JSONDecodeError as e:
-            logger.error(f"Invalid JSON in Stage 1 response: {e}, response: {stage1_response}")
-
-    # Fallback: Map selected files to existing paths
-    valid_files = validate_and_map_files(selected_files, project_files)
-    if not valid_files:
-        logger.error("No valid template files selected or found")
-        return {'error': 'No valid template files selected'}
-
-    # Stage 2: Generate template content
-    response = {'files': {}, 'dependencies': {'python': [], 'js': []}}
-    for file_path in valid_files:
-        current_content = project_files[file_path].get('content', '')
-        stage2_prompt = f"""
-You are a Django template expert. Generate complete template file content for {file_path} based on this request.
-Return a JSON object with the file content as a string:
+CRITICAL: YOU MUST RETURN ONLY A VALID JSON OBJECT WITH THIS EXACT STRUCTURE:
 {{
     "files": {{
-        "{file_path}": "complete template content"
+        "filename.html": "complete file content",
+        "static/js/filename.js": "complete file content"
+    }},
+    "description": "Brief description of changes",
+    "dependencies": {{
+        "python": ["package1"],
+        "js": ["package2"]
     }}
 }}
 
-IMPORTANT INSTRUCTIONS:
-1. Your response MUST be in valid JSON format with the exact structure shown above.
-2. The file content MUST be a string containing complete, valid HTML code.
-3. Include all necessary template tags and maintain existing functionality.
-4. Escape quotes in HTML code as needed.
-5. Use the current file content as a base and apply only the requested changes.
-6. For analytics graphs, include a <canvas> element with an ID and reference Chart.js.
-
-Request: {user_message}
-Current content of {file_path}:
-{current_content}
+FORMATTING RULES:
+1. NO comments in the JSON
+2. NO backticks or code blocks
+3. Proper JSON string escaping
+4. Template files use just filename
+5. Static files use full path
+6. NO explanatory text before or after JSON
 """
-        stage2_response = await call_ai_api_async(prompt=stage2_prompt, max_tokens=8192, temperature=0.3)
-        try:
-            stage2_data = json.loads(stage2_response)
-            file_content = stage2_data.get('files', {}).get(file_path)
-            if isinstance(file_content, str):
-                response['files'][file_path] = file_content
-                if 'analytics' in user_message.lower():
-                    response['dependencies']['js'].append('chart.js')
-            else:
-                logger.error(f"Invalid content type for {file_path}: {type(file_content)}")
-        except (json.JSONDecodeError, AttributeError):
-            logger.error(f"Invalid Stage 2 response for {file_path}: {stage2_response}")
-            continue
-
-    # Cache the response
-    if response['files']:
-        cache.set(cache_key, response, timeout=300)
-        logger.info(f"Cached template changes for {cache_key}")
-
-    return response
-async def generate_view_changes(refined_request: str, current_files: dict) -> dict:
-    """Generate view-specific changes using a two-stage approach"""
-    if DEBUG_VIEW:
-        logger.info(f"Generating view changes for: {refined_request}")
-        logger.info(f"Current view files: {list(current_files.keys())}")
-    
-    # STAGE 1: Only send filenames and directories to select relevant files
-    file_list = "\n".join(f"- {k}" for k in current_files.keys())
-    
-    prompt_stage1 = VIEW_PROMPT_STAGE1.format(
-        refined_request=refined_request,
-        file_list=file_list
-    )
-    
-    if DEBUG_VIEW:
-        logger.info(f"View stage 1 prompt:\n{prompt_stage1}")
-    
-    try:
-        result_stage1 = await make_ai_api_call(prompt_stage1)
+        logger.debug("Generated prompt for initial AI call")
         
-        if DEBUG_VIEW:
-            logger.info(f"View stage 1 response:\n{result_stage1}")
-        
+        # Make the API call
         try:
-            # Parse stage 1 response to get selected files
-            selected_files = []
-            
-            # Try to parse as JSON directly first
-            try:
-                json_data = json.loads(result_stage1)
-                if isinstance(json_data, dict) and 'selected_files' in json_data:
-                    selected_files = json_data['selected_files']
-            except json.JSONDecodeError:
-                # Try to extract from the response
-                match = re.search(r'"selected_files"\s*:\s*\[(.*?)\]', result_stage1, re.DOTALL)
-                if match:
-                    # Extract the content between brackets
-                    files_str = match.group(1)
-                    # Split by commas, strip whitespace and quotes
-                    selected_files = [f.strip().strip('"\'') for f in files_str.split(',')]
-            
-            if not selected_files:
-                logger.error("No files selected in stage 1")
-                return {"files": {}}
-            
-            # Filter out files that aren't in the current_files list
-            valid_selected_files = [f for f in selected_files if f in current_files]
-            if not valid_selected_files:
-                # Look for valid files in current_files that match part of the selected paths
-                valid_selected_files = []
-                for selected in selected_files:
-                    for current in current_files.keys():
-                        if selected.split('/')[-1] in current:
-                            valid_selected_files.append(current)
-                            break
-            
-            if not valid_selected_files:
-                logger.error("No valid files found after filtering")
-                return {"files": {}}
-            
-            # STAGE 2: Send content of the selected files for detailed analysis
-            selected_files_content = ""
-            for file_path in valid_selected_files:
-                content = current_files[file_path]
-                selected_files_content += f"```{file_path}\n{content}\n```\n\n"
-            
-            prompt_stage2 = FORM_PROMPT_STAGE2.format(
-                refined_request=refined_request,
-                selected_files_content=selected_files_content
+            response = await make_ai_api_call(
+                prompt=prompt,
+                max_tokens=8192,
+                temperature=0.2
             )
+            logger.info("Successfully received AI response")
+            logger.debug(f"Response length: {len(response) if response else 0}")
+            return response
             
-            logger.info(f"Form stage 2 prompt:\n{prompt_stage2}")
+        except Exception as api_error:
+            logger.error(f"API call failed: {str(api_error)}")
+            return None
             
-            result_stage2 = await make_ai_api_call(prompt_stage2, max_tokens=4096)
-            
-            logger.info(f"Form stage 2 response:\n{result_stage2}")
-            
-            # Parse stage 2 response
-            changes = parse_ai_output(result_stage2)
-            
-            # If parsing failed, create a basic structure
-            if not isinstance(changes, dict) or "files" not in changes:
-                changes = {"files": {}}
-                # Try to extract file contents directly
-                for file_path in valid_selected_files:
-                    match = re.search(rf'"{file_path}"\s*:\s*"(.*?)"', result_stage2, re.DOTALL)
-                    if match:
-                        content = match.group(1)
-                        changes["files"][file_path] = content
-            
-            return changes
-        except Exception as e:
-            logger.error(f"Failed to parse form changes: {str(e)}")
-            logger.error(traceback.format_exc())
-            return {"files": {}}
     except Exception as e:
-        logger.error(f"Failed to generate form changes: {str(e)}")
-        return {"files": {}}
+        logger.error(f"Error in make_initial_ai_call: {str(e)}")
+        logger.error(traceback.format_exc())
+        return None
 
-async def generate_static_changes(refined_request: str, current_files: dict) -> dict:
-    """Generate static file changes using a two-stage approach"""
-    if DEBUG_STATIC:
-        logger.info(f"Generating static changes for: {refined_request}")
-        logger.info(f"Current static files: {list(current_files.keys())}")
-    
-    # STAGE 1: Only send filenames and directories to select relevant files
-    current_static = {k: v for k, v in current_files.items() if k.startswith('static/')}
-    file_list = "\n".join(f"- {k}" for k in current_static.keys())
-    
-    prompt_stage1 = STATIC_PROMPT_STAGE1.format(
-        refined_request=refined_request,
-        file_list=file_list
-    )
-    
-    if DEBUG_STATIC:
-        logger.info(f"Static stage 1 prompt:\n{prompt_stage1}")
-    
-    try:
-        result_stage1 = await make_ai_api_call(prompt_stage1)
-        
-        if DEBUG_STATIC:
-            logger.info(f"Static stage 1 response:\n{result_stage1}")
-        
-        try:
-            # Parse stage 1 response to get selected files
-            selected_files = []
-            
-            # Try to parse as JSON directly first
-            try:
-                json_data = json.loads(result_stage1)
-                if isinstance(json_data, dict) and 'selected_files' in json_data:
-                    selected_files = json_data['selected_files']
-            except json.JSONDecodeError:
-                # Try to extract from the response
-                match = re.search(r'"selected_files"\s*:\s*\[(.*?)\]', result_stage1, re.DOTALL)
-                if match:
-                    # Extract the content between brackets
-                    files_str = match.group(1)
-                    # Split by commas, strip whitespace and quotes
-                    selected_files = [f.strip().strip('"\'') for f in files_str.split(',')]
-            
-            if not selected_files:
-                logger.error("No files selected in stage 1")
-                return {"files": {}}
-            
-            # Filter out files that aren't in the current_files list
-            valid_selected_files = [f for f in selected_files if f in current_files]
-            if not valid_selected_files:
-                # Look for valid files in current_files that match part of the selected paths
-                valid_selected_files = []
-                for selected in selected_files:
-                    for current in current_files.keys():
-                        if selected.split('/')[-1] in current:
-                            valid_selected_files.append(current)
-                            break
-            
-            if not valid_selected_files:
-                logger.error("No valid files found after filtering")
-                return {"files": {}}
-            
-            # STAGE 2: Send content of the selected files for detailed analysis
-            selected_files_content = ""
-            for file_path in valid_selected_files:
-                content = current_files[file_path]
-                selected_files_content += f"```{file_path}\n{content}\n```\n\n"
-            
-            prompt_stage2 = STATIC_PROMPT_STAGE2.format(
-                refined_request=refined_request,
-                selected_files_content=selected_files_content
-            )
-            
-            if DEBUG_STATIC:
-                logger.info(f"Static stage 2 prompt:\n{prompt_stage2}")
-            
-            result_stage2 = await make_ai_api_call(prompt_stage2, max_tokens=4096)
-            
-            if DEBUG_STATIC:
-                logger.info(f"Static stage 2 response:\n{result_stage2}")
-            
-            # Parse stage 2 response
-            changes = parse_ai_output(result_stage2)
-            
-            # If parsing failed, create a basic structure
-            if not isinstance(changes, dict) or "files" not in changes:
-                changes = {"files": {}}
-                # Try to extract file contents directly
-                for file_path in valid_selected_files:
-                    match = re.search(rf'"{file_path}"\s*:\s*"(.*?)"', result_stage2, re.DOTALL)
-                    if match:
-                        content = match.group(1)
-                        changes["files"][file_path] = content
-            
-            return changes
-        except Exception as e:
-            logger.error(f"Failed to parse static changes: {str(e)}")
-            logger.error(traceback.format_exc())
-            return {"files": {}}
-    except Exception as e:
-        if DEBUG_STATIC:
-            logger.error(f"Failed to generate static changes: {str(e)}")
-        return {"files": {}}
-
-def sanitize_ai_response(text: str) -> str:
-    """
-    Clean up AI-generated code to remove problematic characters and fix common issues
-    """
-    if not text:
-        return text
-        
-    # Replace Unicode characters that may cause issues in Python code
-    replacements = {
-        '\u200b': '',  # Zero width space
-        '\u00a0': ' ',  # Non-breaking space
-        '\u2010': '-',  # Hyphen
-        '\u2011': '-',  # Non-breaking hyphen
-        '\u2012': '-',  # Figure dash
-        '\u2013': '-',  # En dash
-        '\u2014': '-',  # Em dash
-        '\u2015': '-',  # Horizontal bar
-        '\uff08': '(',  # Fullwidth left parenthesis
-        '\uff09': ')',  # Fullwidth right parenthesis
-        '\uff1a': ':',  # Fullwidth colon
-        '\uff1b': ';',  # Fullwidth semicolon
-        '\uff1c': '<',  # Fullwidth less than
-        '\uff1d': '=',  # Fullwidth equals
-        '\uff1e': '>',  # Fullwidth greater than
-        '\uff1f': '?',  # Fullwidth question mark
-        '\u3000': ' ',  # Ideographic space
-    }
-    
-    # Apply all replacements
-    for char, replacement in replacements.items():
-        text = text.replace(char, replacement)
-    
-    # Clean up escaped backslashes in code (\\ -> \)
-    text = text.replace('\\\\', '\\')
-    
-    # Fix common formatting issues in code
-    text = text.replace('.\\ ', '.')
-    text = text.replace('\\ ', '')
-    text = text.replace('`` `', '```')
-    text = text.replace('` ``', '```')
-    
-    # Remove "noqa" comments
-    text = re.sub(r'\s*#\s*noqa.*', '', text)
-    
-    # Remove markdown code block markers if present
-    if text.startswith('```') and text.endswith('```'):
-        # Get the language identifier if present
-        if text.startswith('```python'):
-            text = text[9:-3].strip()
-        else:
-            text = text[3:-3].strip()
-            
+def remove_js_comments(text: str) -> str:
+    """Remove JavaScript comments from JSON response."""
+    # Remove single line comments that are not inside strings
+    text = re.sub(r'(?<!["\'`])//.*$', '', text, flags=re.MULTILINE)
     return text
+
+def fix_backticks(text: str) -> str:
+    """Replace backtick code blocks with proper JSON strings."""
+    return re.sub(r'`(.*?)`', lambda m: json.dumps(m.group(1)), text)
+
+def normalize_file_paths(data: dict) -> dict:
+    """Normalize file paths in the response data."""
+    if not isinstance(data, dict) or 'files' not in data:
+        return data
+        
+    normalized = {}
+    for path, content in data['files'].items():
+        if path.endswith('.html'):
+            normalized[os.path.basename(path)] = content
+        else:
+            normalized[path] = content
+    data['files'] = normalized
+    return data
+
+def escape_json_string(text: str) -> str:
+    """Properly escape newlines and control characters in JSON strings."""
+    # Replace literal newlines and control characters with their escaped versions
+    replacements = {
+        '\n': '\\n',
+        '\t': '\\t',
+        '\r': '\\r',
+        '\b': '\\b',
+        '\f': '\\f'
+    }
+    for char, escape in replacements.items():
+        text = text.replace(char, escape)
+    return text
+
+def parse_descriptive_format(text: str) -> dict:
+    """
+    Parse AI response when it's in descriptive text format instead of JSON.
+    Returns a properly formatted JSON structure.
+    """
+    logger.debug("=== Parsing Descriptive Format ===")
+    logger.debug(f"Input text first 200 chars: {text[:200]}")
+    
+    files = {}
+    dependencies = {"python": [], "js": []}
+    
+    try:
+        # Extract file sections using numbered list format (1. filename...)
+        file_sections = list(re.finditer(r'(?m)^\d+\.\s+([^\n(]+)(?:\s*\(type:\s*([^,\n]+)(?:,\s*app:\s*([^)]+))?\))?\s*(?:-[^\n]+(?:\n|$))+', text))
+        logger.debug(f"Found {len(file_sections)} file sections")
+        
+        for match in file_sections:
+            section_text = match.group(0)
+            logger.debug(f"\nProcessing section:\n{section_text}")
+            
+            file_path = match.group(1).strip()
+            file_type = match.group(2).strip() if match.group(2) else None
+            app_name = match.group(3).strip() if match.group(3) else None
+            
+            logger.debug(f"Extracted - Path: {file_path}, Type: {file_type}, App: {app_name}")
+            
+            # For templates, ensure we only use the filename
+            if file_type == 'templates' or file_path.endswith('.html'):
+                file_path = os.path.basename(file_path)
+                logger.debug(f"Normalized template path to: {file_path}")
+            
+            # Extract content hints from bullet points
+            content_hints = re.findall(r'(?m)^\s*-\s*(.+)$', section_text)
+            logger.debug(f"Content hints: {content_hints}")
+            
+            # Generate appropriate placeholder based on file type
+            if file_path.endswith('.html'):
+                content = "{% extends 'base.html' %}\n\n{% block content %}\n  <!-- Generated from AI description -->\n"
+                for hint in content_hints:
+                    content += f"  <!-- {hint.strip()} -->\n"
+                content += "{% endblock %}"
+            elif file_path.endswith('.js'):
+                content = "// Generated from AI description\n"
+                for hint in content_hints:
+                    content += f"// TODO: {hint.strip()}\n"
+            else:
+                content = "# Generated from AI description\n"
+                for hint in content_hints:
+                    content += f"# TODO: {hint.strip()}\n"
+            
+            files[file_path] = content
+            logger.debug(f"Generated content for {file_path}")
+            
+            # Extract dependencies from description
+            if any('chart' in hint.lower() for hint in content_hints):
+                if 'Chart.js' in section_text:
+                    dependencies['js'].append('chart.js')
+                    logger.debug("Added Chart.js dependency")
+                elif 'D3.js' in section_text:
+                    dependencies['js'].append('d3')
+                    logger.debug("Added D3.js dependency")
+        
+        logger.debug(f"=== Parse Result ===")
+        logger.debug(f"Files: {list(files.keys())}")
+        logger.debug(f"Dependencies: {dependencies}")
+        
+        return {
+            "files": files,
+            "description": "Generated from descriptive format",
+            "dependencies": dependencies
+        }
+        
+    except Exception as e:
+        logger.error(f"Error parsing descriptive format: {str(e)}")
+        logger.error(traceback.format_exc())
+        return {
+            "files": {},
+            "description": "Failed to parse descriptive format",
+            "dependencies": {"python": [], "js": []}
+        }
+
+def extract_json_from_hybrid(text: str) -> Optional[str]:
+    """
+    Extract JSON object from a response that mixes descriptive text and JSON.
+    Only handles the specific case of JSON embedded in descriptive text.
+    """
+    logger.debug("=== Extracting JSON from hybrid response ===")
+    
+    # Find the last occurrence of a JSON-like structure
+    json_matches = list(re.finditer(r'({[\s\S]*})\s*$', text))
+    if not json_matches:
+        logger.debug("No JSON structure found in hybrid response")
+        return None
+        
+    potential_json = json_matches[-1].group(1)
+    logger.debug(f"Found potential JSON structure: {potential_json[:200]}...")
+    
+    try:
+        # Validate it's proper JSON
+        json.loads(potential_json)
+        logger.debug("Successfully validated JSON structure")
+        return potential_json
+    except json.JSONDecodeError as e:
+        logger.debug(f"Invalid JSON in hybrid response: {str(e)}")
+        return None
+
+def handle_backtick_code_blocks(text: str) -> str:
+    """
+    Replace backtick-quoted code blocks with properly escaped JSON strings.
+    Specifically handles the case of backticks in AI responses.
+    """
+    logger.debug("=== Handling backtick code blocks ===")
+    logger.debug(f"Input text first 200 chars: {text[:200]}")
+    
+    try:
+        # Replace backtick-quoted blocks with properly escaped JSON strings
+        processed_text = re.sub(
+            r'`([^`]*)`',
+            lambda m: json.dumps(m.group(1)),
+            text
+        )
+        logger.debug(f"Processed text first 200 chars: {processed_text[:200]}")
+        return processed_text
+    except Exception as e:
+        logger.error(f"Error handling backtick code blocks: {str(e)}")
+        return text
+
+def sanitize_json_response(text: str) -> str:
+    """
+    Sanitize JSON response by removing comments and fixing formatting issues.
+    Specifically handles the case where AI returns JSON with comments.
+    """
+    logger.debug("=== Sanitizing JSON Response ===")
+    logger.debug(f"Original response:\n{text[:500]}")
+    
+    try:
+        # Remove JSON comments before parsing
+        lines = text.split('\n')
+        clean_lines = []
+        in_string = False
+        string_char = None
+        
+        for line in lines:
+            logger.debug(f"Processing line: {line}")
+            cleaned = ''
+            i = 0
+            while i < len(line):
+                char = line[i]
+                
+                # Track string boundaries
+                if char in ['"', "'"] and (i == 0 or line[i-1] != '\\'):
+                    if not in_string:
+                        in_string = True
+                        string_char = char
+                    elif char == string_char:
+                        in_string = False
+                        string_char = None
+                
+                # Only process comments outside of strings
+                if not in_string and char == '/' and i + 1 < len(line) and line[i + 1] == '/':
+                    logger.debug(f"Found comment in line: {line}")
+                    break
+                
+                cleaned += char
+                i += 1
+            
+            if cleaned.strip():
+                clean_lines.append(cleaned)
+        
+        clean_json = '\n'.join(clean_lines)
+        logger.debug(f"Cleaned JSON:\n{clean_json[:500]}")
+        
+        # Validate the cleaned JSON
+        try:
+            parsed = json.loads(clean_json)
+            logger.debug("Successfully parsed cleaned JSON")
+            return json.dumps(parsed)
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse cleaned JSON: {str(e)}")
+            logger.debug(f"Error location - line {e.lineno}, column {e.colno}")
+            logger.debug(f"Error context:\n{clean_json[max(0, e.pos-100):e.pos+100]}")
+            return None
+            
+    except Exception as e:
+        logger.error(f"Error in sanitize_json_response: {str(e)}")
+        return None
+
+VALIDATE_JSON_PROMPT = r"""You are a JSON validator and cleaner. Your task is to fix and validate the provided JSON.
+
+CRITICAL: YOU MUST RETURN ONLY A VALID JSON OBJECT WITH NO ADDITIONAL TEXT.
+
+RULES:
+1. Remove any comments (both // and /* */)
+2. Fix any formatting issues
+3. Ensure proper string escaping
+4. Remove any markdown formatting
+5. Remove any explanatory text
+6. Preserve the exact data structure
+
+Input JSON to clean:
+{input_json}
+
+Remember: Return ONLY the fixed JSON, nothing else."""
+
+async def validate_json_with_ai(json_text: str) -> Optional[str]:
+    """
+    Use AI to validate and clean JSON response.
+    Only handles JSON validation, no other modifications.
+    """
+    logger.debug("=== Validating JSON with AI ===")
+    logger.debug(f"Input JSON:\n{json_text[:500]}")
+    
+    try:
+        # First try to parse as is
+        try:
+            json.loads(json_text)
+            logger.debug("JSON already valid")
+            return json_text
+        except json.JSONDecodeError as e:
+            logger.debug(f"Initial JSON parse failed: {str(e)}")
+        
+        # Call AI for validation
+        prompt = VALIDATE_JSON_PROMPT.format(input_json=json_text)
+        validated = await async_call_ai_api(prompt=prompt, max_tokens=4096)
+        
+        if not validated:
+            logger.error("AI validation returned empty response")
+            return None
+            
+        logger.debug(f"AI validated response:\n{validated[:500]}")
+        
+        # Verify the AI response is valid JSON
+        try:
+            json.loads(validated)
+            logger.debug("AI validation successful")
+            return validated
+        except json.JSONDecodeError as e:
+            logger.error(f"AI validation failed to produce valid JSON: {str(e)}")
+            return None
+            
+    except Exception as e:
+        logger.error(f"Error in validate_json_with_ai: {str(e)}")
+        return None
+
+def sanitize_ai_response(response_text: str) -> str:
+    """
+    Sanitize AI response to ensure valid JSON for parsing.
+    This function now uses the centralized JSONValidator.
+    """
+    if not response_text:
+        logger.error("Empty response received in sanitize_ai_response")
+        return ''
+
+    logger.debug(f"Input first 200 chars: {response_text[:200]}")
+    
+    # Use the new JSONValidator for cleaning and validation
+    is_valid, cleaned_response, error_msg = JSONValidator.validate_and_parse(response_text)
+    
+    if is_valid and cleaned_response:
+        return json.dumps(cleaned_response)
+    
+    # Try fallback regex extraction if JSON parsing fails
+    extracted = JSONValidator.extract_json_with_regex(response_text)
+    if extracted:
+        return json.dumps(extracted)
+        
+    return ''
 
 async def call_ai_multi_file(conversation, text, files_data):
     """Call AI service for multiple file changes with validation and refinement."""
     try:
+        logger.info("Starting multi-file AI call")
+        logger.debug(f"Files data keys: {list(files_data.keys())}")
+        
+        # Add debugging for project context
+        project_context = files_data.get('project_context', {})
+        logger.info(f"Project ID: {files_data.get('project_id')}")
+        logger.info(f"App name: {files_data.get('app_name')}")
+        
         response = {
             'files': {},
             'metadata': {
                 'files_processed': 0,
                 'files_skipped': 0,
                 'validation_attempts': 0
-            }
+            },
+            'selected_files': []
         }
 
-        # Handle refinement requests
-        if isinstance(files_data, dict) and files_data.get('refinement_request'):
-            try:
-                result = await call_ai_api_async(prompt=text, max_tokens=8192, temperature=0.2)
-                if result:
-                    response['files'] = {'refined_content': result}
-                return response
-            except Exception as e:
-                logger.error(f"Error in refinement request: {str(e)}")
-                return {'error': str(e)}
-
-        # Process AI-generated file changes
-        validator = DjangoCodeValidator()
-        max_validation_attempts = 3
-        max_retry_attempts = 2
-
-        # Assume files_data is from generate_template_changes or similar
-        for attempt in range(max_retry_attempts):
-            files_to_process = files_data.get('files', {}) if isinstance(files_data, dict) else files_data
-            if attempt > 0:
-                logger.info(f"Retrying AI call, attempt {attempt + 1}")
-                # Re-call AI functions (e.g., generate_template_changes) if needed
-                # This assumes files_data is the output of generate_template_changes
-                files_to_process = await generate_template_changes(
-                    files_data.get('refined_request', text),
-                    files_data.get('context', {}),
-                    files_data.get('file_list', ''),
-                    files_data.get('project_name', ''),
-                    files_data.get('app_name', ''),
-                    text
-                )
-                files_to_process = files_to_process.get('files', {})
-
-            for file_path, content in files_to_process.items():
-                try:
-                    # Skip invalid file paths
-                    if not file_path or not isinstance(file_path, str):
-                        logger.warning("Invalid file path, skipping")
-                        response['metadata']['files_skipped'] += 1
-                        continue
-
-                    # Validate content type
-                    if not isinstance(content, str):
-                        logger.error(f"Invalid content type for {file_path}: {type(content)}")
-                        response['metadata']['files_skipped'] += 1
-                        if attempt < max_retry_attempts - 1:
-                            continue
-                        break
-
-                    # Validate and refine content
-                    current_content = content
-                    is_valid = False
-                    validation_issues = []
-
-                    for val_attempt in range(max_validation_attempts):
-                        response['metadata']['validation_attempts'] += 1
-                        
-                        # Skip empty content
-                        if not current_content or not current_content.replace('\n', '').replace(' ', ''):
-                            logger.warning(f"Empty content for {file_path}, skipping")
-                            break
-
-                        # Validate current content
-                        is_valid, issues = validator.validate_file(file_path, current_content)
-                        if is_valid:
-                            response['files'][file_path] = current_content
-                            response['metadata']['files_processed'] += 1
-                            logger.info(f"File {file_path} validated successfully on attempt {val_attempt + 1}")
-                            break
-
-                        # Store issues for refinement
-                        validation_issues = issues
-
-                        if val_attempt < max_validation_attempts - 1:
-                            refinement_prompt = f"""
-Please fix the following validation issues in {file_path}:
-{', '.join(issues)}
-
-Current content:
-{current_content}
-
-Requirements:
-1. Fix all validation issues
-2. Maintain the same functionality
-3. Ensure proper syntax and imports
-4. Return only the fixed content as a string
-"""
-                            try:
-                                refined_result = await call_ai_api_async(
-                                    refinement_prompt,
-                                    file_path,
-                                    max_tokens=8192,
-                                    temperature=0.2 + (val_attempt * 0.1)
-                                )
-                                if refined_result and isinstance(refined_result, str):
-                                    current_content = refined_result
-                                    continue
-                            except Exception as e:
-                                logger.error(f"Refinement attempt {val_attempt + 1} failed: {str(e)}")
-
-                        logger.warning(f"Validation failed for {file_path} after {val_attempt + 1} attempts: {issues}")
-
-                    if not is_valid:
-                        response['metadata']['files_skipped'] += 1
-                        logger.error(f"Failed to validate {file_path} after {max_validation_attempts} attempts")
-
-                except Exception as e:
-                    logger.error(f"Error processing {file_path}: {str(e)}")
+        # Make initial AI call
+        initial_response = await make_initial_ai_call(conversation, text, files_data)
+        if not initial_response:
+            logger.error("Initial AI call failed")
+            return None
+            
+        # Debug the initial response
+        logger.debug(f"Raw initial response: {initial_response[:500]}...")
+        
+        # Sanitize the response before parsing
+        sanitized_response = sanitize_ai_response(initial_response)
+        logger.debug(f"Sanitized AI response: {sanitized_response[:500]}...")
+        
+        # Parse the response
+        try:
+            changes = json.loads(sanitized_response)
+            if not isinstance(changes, dict):
+                logger.error(f"Invalid response format - not a dict: {type(changes)}")
+                return None
+                
+            files = changes.get('files', {})
+            if not isinstance(files, dict):
+                logger.error(f"Invalid files format - not a dict: {type(files)}")
+                return None
+                
+            logger.info(f"Files to process: {list(files.keys())}")
+            
+            # Get existing files from project context
+            existing_files = set()
+            if 'templates' in project_context:
+                existing_files.update(t['name'] for t in project_context['templates'])
+            for path in project_context.keys():
+                if isinstance(path, str):
+                    existing_files.add(path)
+            
+            # Process each file
+            for file_path, content in files.items():
+                logger.info(f"Processing file: {file_path}")
+                
+                # Normalize path but preserve app prefix
+                norm_path = normalize_template_path(file_path)
+                logger.info(f"Normalized path: {norm_path}")
+                
+                # Check if file exists or is a new static/media file
+                is_new_static = file_path.startswith(('static/', 'media/'))
+                file_exists = norm_path in existing_files or file_path in existing_files
+                
+                if not file_exists and not is_new_static:
+                    logger.warning(f"Selected file {file_path} not found in project")
                     response['metadata']['files_skipped'] += 1
                     continue
+                
+                # Process the file
+                response['files'][file_path] = content
+                response['metadata']['files_processed'] += 1
+                response['selected_files'].append(file_path)
+                logger.info(f"{'Adding new' if is_new_static else 'Processing existing'} file: {file_path}")
+                
+            logger.info(f"Processed {response['metadata']['files_processed']} files, skipped {response['metadata']['files_skipped']}")
+            logger.info(f"Selected files: {response['selected_files']}")
+            
+            if not response['files']:
+                logger.error("No relevant existing files found")
+                return None
+                
+            return response
 
-            if response['files']:
-                break  # Exit retry loop if valid files are processed
-
-        if not response['files']:
-            logger.error("No valid files in response")
-            return {'error': 'No valid code changes were generated'}
-
-        logger.info(f"Processed {response['metadata']['files_processed']} files successfully")
-        return response
-
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON decode error: {str(e)}")
+            logger.error(f"Sanitized response causing error: {sanitized_response}")
+            return None
+            
     except Exception as e:
         logger.error(f"Error in call_ai_multi_file: {str(e)}")
         logger.error(traceback.format_exc())
-        return {'error': str(e)}
+        return None
 
 def validate_generated_code(file_path: str, content: str) -> bool:
     """Validate generated code based on file type"""
@@ -1546,6 +1376,96 @@ def postprocess_django_template(template_content):
     processed = re.sub(r'VAR_(\w+)', r'{{ \1 }}', processed)
     processed = re.sub(r'TAG_(\w+)', r'{% \1 %}', processed)
     return processed
+
+def normalize_template_path(path: str) -> str:
+    """
+    Normalize template path by handling templates/ prefix appropriately,
+    but preserving app prefixes (like posts/ or users/)
+    
+    For Django templates stored in the database:
+    - If format is 'app/templates/file.html', extract file.html (DB stores just the filename)
+    - If format is 'templates/file.html', extract file.html
+    - If format is already 'file.html', leave as is
+    """
+    try:
+        logger.debug(f"Normalizing path: {path}")
+        
+        if not path:
+            logger.warning("Empty path provided to normalize_template_path")
+            return path
+            
+        # Extract just the filename for templates
+        # If app/templates/file.html -> extract file.html (matches DB format)
+        if '/' in path and '.html' in path.lower():
+            filename = os.path.basename(path)
+            logger.debug(f"Extracted template filename: {filename}")
+            return filename
+            
+        # For non-template files, preserve the path structure
+        logger.debug(f"Path unchanged: {path}")
+        return path
+        
+    except Exception as e:
+        logger.error(f"Error in normalize_template_path: {str(e)}")
+        logger.error(traceback.format_exc())
+        return path
+
+def validate_and_map_files(selected_files, project_files):
+    """
+    Validate and map selected files to actual project files.
+    Returns a list of valid file paths that exist in the project.
+    """
+    try:
+        logger.info(f"Validating {len(selected_files)} selected files against {len(project_files)} project files")
+        logger.debug(f"Selected files: {selected_files}")
+        logger.debug(f"Project files: {list(project_files.keys())}")
+        valid_files = []
+        
+        for selected_path in selected_files:
+            logger.debug(f"\nProcessing selected path: {selected_path}")
+            
+            # Normalize the selected path
+            norm_path = normalize_template_path(selected_path)
+            logger.debug(f"Normalized path: {norm_path}")
+            
+            # Try direct match first
+            if norm_path in project_files:
+                valid_files.append(norm_path)
+                logger.info(f"Direct match found for {selected_path} -> {norm_path}")
+                continue
+            else:
+                logger.debug(f"No direct match found for normalized path: {norm_path}")
+                logger.debug(f"Available paths: {[p for p in project_files.keys() if p.endswith(os.path.basename(norm_path))]}")
+            
+            # Try with templates/ prefix
+            if selected_path in project_files:
+                valid_files.append(selected_path)
+                logger.info(f"Prefix match found for {selected_path}")
+                continue
+            else:
+                logger.debug(f"No prefix match found for: {selected_path}")
+            
+            # Try fuzzy matching
+            matching_paths = [
+                path for path in project_files.keys()
+                if os.path.basename(path) == os.path.basename(norm_path)
+            ]
+            if matching_paths:
+                valid_files.append(matching_paths[0])
+                logger.info(f"Fuzzy match found: {selected_path} -> {matching_paths[0]}")
+            else:
+                logger.debug(f"No fuzzy matches found. Basename comparison:")
+                logger.debug(f"Looking for: {os.path.basename(norm_path)}")
+                logger.debug(f"Available basenames: {[os.path.basename(p) for p in project_files.keys()][:5]}...")
+                logger.warning(f"No matching file found for {selected_path} (normalized: {norm_path})")
+                
+        logger.info(f"Validation complete. Found {len(valid_files)} valid files: {valid_files}")
+        return valid_files
+        
+    except Exception as e:
+        logger.error(f"Error in validate_and_map_files: {str(e)}")
+        logger.error(traceback.format_exc())
+        return []
 
 class AIEditor:
     def __init__(self, project_id, app_name=None):

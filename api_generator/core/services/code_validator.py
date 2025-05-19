@@ -67,7 +67,7 @@ class DjangoCodeValidator:
                 logger.debug("Empty content, skipping validation")
                 return True, []
                 
-            # Determine file type
+            # Determine file type with more specific categorization
             file_type = self._get_file_type(file_path)
             logger.debug(f"Determined file type: {file_type}")
             
@@ -84,18 +84,18 @@ class DjangoCodeValidator:
                 logger.debug("Other static file, accepting without validation")
                 return True, []  # Accept other static files without validation
             
-            # Validate based on file type
+            # Enhanced validation based on file type with improved Django template handling
             if file_type == 'python':
                 logger.debug("Validating Python file")
                 return self._validate_python(file_path, normalized_content)
-            elif file_type == 'template':
-                logger.debug("Validating template file")
+            elif file_type in ['template', 'analytics_template']:
+                logger.debug(f"Validating {file_type} file")
                 return self._validate_template(file_path, normalized_content)
-            elif file_type == 'javascript':
-                logger.debug("Validating JavaScript file")
+            elif file_type in ['javascript', 'analytics_js']:
+                logger.debug(f"Validating {file_type} file")
                 return self._validate_javascript(file_path, normalized_content)
-            elif file_type == 'css':
-                logger.debug("Validating CSS file")
+            elif file_type in ['css', 'analytics_css']:
+                logger.debug(f"Validating {file_type} file")
                 return self._validate_css(file_path, normalized_content)
             elif file_type == 'json':
                 logger.debug("Validating JSON file")
@@ -452,89 +452,179 @@ class DjangoCodeValidator:
         return has_essentials, issues
         
     def _validate_template(self, file_path: str, content: str) -> Tuple[bool, List[str]]:
-        """Validate Django template code"""
+        """Enhanced validation for Django templates with better handling of template tags"""
         issues = []
         
-        # Check for basic template structure
-        if not ('{% extends' in content or '<html' in content.lower()):
-            issues.append("No template inheritance or HTML structure found")
+        # Basic syntax validation
+        basic_valid, basic_issues = self._validate_basic_syntax(file_path, content)
+        if not basic_valid:
+            issues.extend(basic_issues)
+        
+        # Check for mismatched Django template tags
+        open_tags = len(re.findall(r'{%', content))
+        close_tags = len(re.findall(r'%}', content))
+        if open_tags != close_tags:
+            issues.append(f"Mismatched Django template tags: {open_tags} opening vs {close_tags} closing")
+        
+        # Check for mismatched Django variable tags
+        open_vars = len(re.findall(r'{{', content))
+        close_vars = len(re.findall(r'}}', content))
+        if open_vars != close_vars:
+            issues.append(f"Mismatched Django variable tags: {open_vars} opening vs {close_vars} closing")
+
+        # Check for invalid Django tag syntax
+        if re.search(r'DJANGO_TAG_START|DJANGO_TAG_END', content):
+            issues.append("Invalid placeholder tags used (DJANGO_TAG_START/DJANGO_TAG_END) instead of {% and %}")
             
-        # Check for balanced template tags
-        if content.count('{%') != content.count('%}'):
-            issues.append("Mismatched template tags")
+        # Check for HTML structure issues
+        if not re.search(r'<!DOCTYPE|<html|{% extends', content, re.IGNORECASE):
+            issues.append("Missing HTML doctype, html tag, or template inheritance")
             
-        # Check for balanced blocks
-        block_starts = len(re.findall(r'{%\s*block\s+\w+\s*%}', content))
-        block_ends = len(re.findall(r'{%\s*endblock\s*%}', content))
-        if block_starts != block_ends:
-            issues.append("Mismatched template blocks")
+        # Check for balanced HTML tags
+        html_tag_pattern = r'<([a-zA-Z][a-zA-Z0-9]*)[^>]*>|</([a-zA-Z][a-zA-Z0-9]*)>'
+        tag_matches = re.finditer(html_tag_pattern, content)
+        open_tags_stack = []
+        self_closing_tags = {'img', 'br', 'hr', 'input', 'meta', 'link'}
+        
+        for match in tag_matches:
+            opening_tag, closing_tag = match.groups()
             
-        # Check for proper DOCTYPE and meta tags
-        if '<html' in content.lower():
-            if '<!DOCTYPE html>' not in content:
-                issues.append("Missing DOCTYPE declaration")
-            if '<meta charset=' not in content.lower():
-                issues.append("Missing charset meta tag")
+            if opening_tag:
+                # Skip self-closing tags
+                if '/' in match.group() or opening_tag.lower() in self_closing_tags:
+                    continue
+                open_tags_stack.append(opening_tag.lower())
+            elif closing_tag:
+                if not open_tags_stack:
+                    issues.append(f"Unmatched closing tag: {closing_tag}")
+                elif open_tags_stack[-1] != closing_tag.lower():
+                    issues.append(f"Mismatched tags: expected </{open_tags_stack[-1]}>, found </{closing_tag}>")
+                else:
+                    open_tags_stack.pop()
+        
+        if open_tags_stack:
+            issues.append(f"Unclosed tags: {', '.join(open_tags_stack)}")
+            
+        # Check for extends/include with invalid filenames
+        extends_matches = re.findall(r'{%\s*extends\s+[\'"](.+?)[\'"]\s*%}', content)
+        for ext in extends_matches:
+            if not ext.endswith('.html') and '/' not in ext:
+                issues.append(f"Possibly invalid extends path: {ext}")
                 
-        # Check for accessibility
-        if 'alt=' not in content and '<img' in content:
-            issues.append("Images missing alt attributes")
+        include_matches = re.findall(r'{%\s*include\s+[\'"](.+?)[\'"]\s*%}', content)
+        for inc in include_matches:
+            if not inc.endswith('.html') and '/' not in inc:
+                issues.append(f"Possibly invalid include path: {inc}")
+                
+        # Check for invalid HTML escaping in content
+        if re.search(r'&amp;quot;|&amp;apos;|&amp;lt;|&amp;gt;|&amp;amp;', content):
+            issues.append("Double HTML escaping detected")
             
+        # Check for Django specific issues
+        if '{{ for ' in content or '{% item }}' in content:
+            issues.append("Invalid Django template syntax with misplaced brackets")
+            
+        # Special check for analytics templates
+        if 'analytics' in file_path.lower() and not re.search(r'chart|canvas', content, re.IGNORECASE):
+            issues.append("Analytics template missing chart or canvas elements")
+            
+        # Check for script tags with analytics-related content in analytics templates
+        if 'analytics' in file_path.lower() and not re.search(r'<script[^>]*>[\s\S]*?(chart|graph|data)[\s\S]*?</script>', content, re.IGNORECASE):
+            issues.append("Analytics template missing JavaScript code for data visualization")
+        
         return len(issues) == 0, issues
         
     def _validate_javascript(self, file_path: str, content: str) -> Tuple[bool, List[str]]:
-        """Basic JavaScript validation"""
+        """Validate JavaScript with enhanced checks for Django integration and analytics"""
         issues = []
         
-        # Check for basic syntax issues
+        # Basic validation
+        if not content.strip():
+            issues.append("Empty JavaScript file")
+            return False, issues
+            
+        # Minimal syntax check (without full parsing)
         if content.count('{') != content.count('}'):
             issues.append("Mismatched curly braces")
             
         if content.count('(') != content.count(')'):
             issues.append("Mismatched parentheses")
+        
+        if content.count('[') != content.count(']'):
+            issues.append("Mismatched brackets")
             
-        # Check for common JS patterns
-        if 'function' in content and 'return' not in content:
-            issues.append("Functions missing return statements")
-            
-        if 'new Promise' in content and '.catch' not in content:
-            issues.append("Promise without error handling")
-            
-        # Check for proper semicolon usage
-        lines = content.splitlines()
-        for i, line in enumerate(lines, 1):
-            line = line.strip()
-            if line and not line.endswith(';') and not line.endswith('{') and not line.endswith('}'):
-                issues.append(f"Line {i}: Missing semicolon")
+        # Check for invalid syntax patterns
+        invalid_patterns = [
+            (r'\w+\s*:\s*function\s*[^(]', "Missing parentheses after function"),
+            (r'function\s+\w+\s*[^(]', "Missing parentheses in function declaration"),
+            (r'var\s+\w+\s*=\s*{[^}]*,\s*}', "Trailing comma in object"),
+            (r'var\s+\w+\s*=\s*\[[^]]*,\s*\]', "Trailing comma in array"),
+            (r'===\s*undefined', "Triple equals with undefined")
+        ]
+        
+        for pattern, message in invalid_patterns:
+            if re.search(pattern, content):
+                issues.append(message)
                 
+        # Check for special issues in Django integration
+        if '{{' in content or '}}' in content:
+            # Check for unescaped Django template variables
+            if not re.search(r'"{{|}}"|\'{{|}}\'', content):
+                issues.append("Unquoted Django template variables in JavaScript")
+                
+        # If it's analytics JS, check for specific requirements
+        if 'analytics' in file_path.lower() or 'chart' in file_path.lower():
+            analytics_requirements = [
+                (r'chart|graph', "Missing chart or graph initialization"),
+                (r'data\s*:|datasets\s*:', "Missing data or datasets definition"),
+                (r'labels\s*:', "Missing labels definition"),
+                (r'(getElementById|querySelector)', "Missing element selection")
+            ]
+            
+            for pattern, message in analytics_requirements:
+                if not re.search(pattern, content, re.IGNORECASE):
+                    issues.append(message)
+        
         return len(issues) == 0, issues
         
     def _validate_css(self, file_path: str, content: str) -> Tuple[bool, List[str]]:
-        """Basic CSS validation"""
+        """Validate CSS with enhanced checks for Django integration and analytics"""
         issues = []
         
-        # Check for basic syntax issues
+        # Basic validation
+        if not content.strip():
+            issues.append("Empty CSS file")
+            return False, issues
+            
+        # Check for basic CSS syntax
         if content.count('{') != content.count('}'):
             issues.append("Mismatched curly braces")
             
-        # Check for vendor prefixes
-        prefixes = ['-webkit-', '-moz-', '-ms-', '-o-']
-        for prefix in prefixes:
-            if prefix in content and not all(p in content for p in prefixes):
-                issues.append("Inconsistent use of vendor prefixes")
-                break
+        # Check for common syntax issues
+        invalid_patterns = [
+            (r'[^}]\s*{\s*}', "Empty CSS rule"),
+            (r'[^;{}]\s*}', "Missing semicolon before closing brace"),
+            (r'{\s*[^:{}\s]+\s*:(?:[^:;}]+;)*[^:;}]+\s*;\s*}', "Trailing semicolon in last property"),
+            (r'#[^{]*#', "Multiple ID selectors in single rule"),
+            (r'--\w+\s*[^:;]', "Invalid CSS variable declaration")
+        ]
+        
+        for pattern, message in invalid_patterns:
+            if re.search(pattern, content):
+                issues.append(message)
                 
-        # Check for !important usage
-        if '!important' in content:
-            issues.append("Use of !important found - consider refactoring")
+        # If it's analytics CSS, check for specific requirements
+        if 'analytics' in file_path.lower() or 'chart' in file_path.lower():
+            analytics_requirements = [
+                (r'\.chart|#chart|canvas', "Missing chart-related selectors"),
+                (r'width|height', "Missing dimension styling"),
+                (r'margin|padding', "Missing spacing properties")
+            ]
             
-        # Check for proper media queries
-        if '@media' in content:
-            media_queries = re.findall(r'@media[^{]+{', content)
-            for query in media_queries:
-                if 'screen' not in query and 'print' not in query:
-                    issues.append("Media query missing screen/print specification")
-                    
+            for pattern, message in analytics_requirements:
+                if not re.search(pattern, content, re.IGNORECASE):
+                    issues.append(message)
+        
         return len(issues) == 0, issues
         
     def _validate_generic(self, file_path: str, content: str) -> Tuple[bool, List[str]]:
