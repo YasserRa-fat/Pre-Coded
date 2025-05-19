@@ -2257,3 +2257,36 @@ def setup_preview_project(project_id, preview_alias, raw_label, change_id=None):
     except Exception as e:
         logger.error(f"Error in setup_preview_project: {str(e)}")
         raise
+
+class CancelChangesAPIView(APIView):
+    def post(self, request, project_id, change_id):
+        try:
+            # Get the change request
+            change_request = AIChangeRequest.objects.get(id=change_id, project_id=project_id)
+            
+            # Update the status to cancelled
+            change_request.status = 'cancelled'
+            change_request.save()
+            
+            # If there's an associated conversation, update its status
+            if hasattr(change_request, 'conversation') and change_request.conversation:
+                change_request.conversation.status = 'cancelled'
+                change_request.conversation.save()
+            
+            # Clean up any preview instances
+            try:
+                before_alias = f"preview_{project_id}_before_{change_id}"
+                after_alias = f"preview_{project_id}_after_{change_id}"
+                preview_manager.cleanup_preview(before_alias)
+                preview_manager.cleanup_preview(after_alias)
+            except Exception as e:
+                logger.error(f"Error cleaning up previews: {e}")
+                # Continue despite preview cleanup errors
+            
+            return Response({"message": "Changes cancelled successfully"}, status=status.HTTP_200_OK)
+            
+        except AIChangeRequest.DoesNotExist:
+            return Response({"error": "Change request not found"}, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            logger.error(f"Error cancelling changes: {e}")
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

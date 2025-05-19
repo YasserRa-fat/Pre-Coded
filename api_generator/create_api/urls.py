@@ -49,13 +49,14 @@ from .views import (
     ModelFileListCreateAPIView,
     RunProjectAPIView,
     AIConversationViewSet, 
-     DebugDBAlias, # <— make sure this is imported
-     CookieTokenObtainPairView,
-     preview_view,
-     PreviewOneView,
-     ApplyChangesAPIView,
-     FullPreviewDiffAPIView,
-     PreviewRunAPIView,
+    DebugDBAlias, # <— make sure this is imported
+    CookieTokenObtainPairView,
+    preview_view,
+    PreviewOneView,
+    ApplyChangesAPIView,
+    FullPreviewDiffAPIView,
+    PreviewRunAPIView,
+    CancelChangesAPIView,  # Add this import
 )
 
 # router for your AI endpoints
@@ -155,6 +156,7 @@ path(
         name="apply-changes"
     ),
     path('projects/<int:project_id>/preview/run/', PreviewRunAPIView.as_view(), name='preview-run'),
+    path('projects/<int:project_id>/changes/<int:change_id>/cancel/', CancelChangesAPIView.as_view(), name='cancel-changes'),
 ]
 
 # finally wire up our AI router
