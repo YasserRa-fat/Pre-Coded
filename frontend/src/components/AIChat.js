@@ -1,38 +1,108 @@
 import axios from 'axios';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { useDiff } from '../context/DiffContext';
 import './css/AIChat.css';
 
 // Get WebSocket host from environment or use default Django development server
 const WS_HOST = process.env.REACT_APP_WS_HOST || window.location.hostname + ':8001';
 
-export default function AIChat({ projectId, appName, filePath, onDiff }) {
+export default function AIChat({ projectId, appName, filePath, hiddenInstance }) {
+  const { showDiffModal } = useDiff();
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
-  const [status, setStatus] = useState('open');
-  const [changeId, setChangeId] = useState(null);
-  const [accessToken, setAccessToken] = useState(localStorage.getItem('access_token'));
-  const wsRef = useRef(null);
-  const messagesEnd = useRef(null);
   const [isConnected, setIsConnected] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [connectionError, setConnectionError] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
+  const wsRef = useRef(null);
+  const messagesEnd = useRef(null);
   const isComponentMounted = useRef(true);
   const processingTimeoutRef = useRef(null);
   const reconnectAttempts = useRef(0);
-  const maxReconnectAttempts = 5; // Increased from 3 to 5
-  const reconnectDelay = 1000; // 1 second
+  const maxReconnectAttempts = 5;
+  const reconnectDelay = 1000;
   const connectionTimeoutRef = useRef(null);
   const reconnectTimeoutRef = useRef(null);
-  const pingIntervalRef = useRef(null); // For sending periodic pings
+  const pingIntervalRef = useRef(null);
+  const tokenRefreshTimeoutRef = useRef(null);
+  const [accessToken, setAccessToken] = useState(localStorage.getItem('access_token'));
 
-  const handleDiff = useCallback((diffData) => {
-    if (onDiff) onDiff(diffData);
-  }, [onDiff]);
+  // Handle diff data from WebSocket
+  const handleDiffMessage = useCallback((msg) => {
+    console.log('Handling show_diff_modal:', msg);
+    if (processingTimeoutRef.current) {
+      clearTimeout(processingTimeoutRef.current);
+    }
+    setIsLoading(false);
+    setIsProcessing(false);
+
+    try {
+      let formattedFiles = [];
+      const files = msg.files;
+      const diff = msg.diff || {};
+
+      console.log(`Processing diff with ${Array.isArray(files) ? files.length : 'object'} files`);
+      
+      if (Array.isArray(files)) {
+        formattedFiles = files.map(file => {
+          if (typeof file === 'object' && file.filePath) {
+            return {
+              ...file,
+              filePath: file.filePath.replace(/^templates\//, ''),
+              projectId,
+              changeId: msg.change_id
+            };
+          }
+          return {
+            filePath: file.replace(/^templates\//, ''),
+            fullPath: file,
+            before: diff[file] || '',
+            after: files[file] || diff[file] || '',
+            projectId,
+            changeId: msg.change_id
+          };
+        });
+      } else if (typeof files === 'object') {
+        formattedFiles = Object.entries(files).map(([path, content]) => ({
+          filePath: path.replace(/^templates\//, ''),
+          fullPath: path,
+          before: diff[path] || '',
+          after: content || '',
+          projectId,
+          changeId: msg.change_id
+        }));
+      }
+
+      if (!formattedFiles.length) {
+        throw new Error('No files to review');
+      }
+
+      console.log('Formatted files for diff modal:', formattedFiles);
+      
+      const diffData = {
+        files: formattedFiles,
+        previewMap: msg.previewMap || {},
+        change_id: msg.change_id,
+        isNewDiff: true
+      };
+      
+      if (!hiddenInstance) {
+        showDiffModal(diffData);
+        setMessages(m => [...m, { 
+          sender: 'assistant', 
+          text: 'Changes are ready for review in the diff viewer.' 
+        }]);
+      }
+      
+    } catch (error) {
+      console.error('Error processing diff modal data:', error);
+      setMessages(m => [...m, { sender: 'assistant', text: `Error: ${error.message}` }]);
+    }
+  }, [projectId, hiddenInstance, showDiffModal]);
 
   const cleanupWebSocket = useCallback(() => {
     // Clear all timeouts
-    [processingTimeoutRef, connectionTimeoutRef, reconnectTimeoutRef, pingIntervalRef].forEach(ref => {
+    [processingTimeoutRef, connectionTimeoutRef, reconnectTimeoutRef, pingIntervalRef, tokenRefreshTimeoutRef].forEach(ref => {
       if (ref.current) {
         clearTimeout(ref.current);
         clearInterval(ref.current);
@@ -62,6 +132,130 @@ export default function AIChat({ projectId, appName, filePath, onDiff }) {
     }
   }, []);
 
+  // Refresh auth token function
+  const refreshToken = useCallback(async () => {
+    try {
+      const refresh = localStorage.getItem('refresh_token');
+      if (!refresh) {
+        throw new Error('No refresh token available');
+      }
+      
+      const response = await axios.post('/api/token/refresh/', { refresh });
+      const { access } = response.data;
+      
+      localStorage.setItem('access_token', access);
+      setAccessToken(access);
+      
+      console.log('Access token refreshed successfully');
+      
+      // Attempt reconnection with new token
+      cleanupWebSocket();
+      reconnectAttempts.current = 0; // Reset attempts
+      connectWebSocket();
+      
+      return true;
+    } catch (error) {
+      console.error('Token refresh failed:', error);
+      return false;
+    }
+  }, [cleanupWebSocket]);
+
+  // Initialize WebSocket message handler
+  const handleWebSocketMessage = useCallback(async (e) => {
+    // Ensure component is still mounted
+    if (!isComponentMounted.current) return;
+    
+    let data = e.data;
+    console.log('Raw message received type:', typeof data);
+    
+    try {
+      // Check if message is a ping response
+      if (data === 'pong' || data === '{"type":"pong"}') {
+        console.log('Received pong');
+        return;
+      }
+      
+      // Parse the JSON message
+      let msg;
+      if (typeof data === 'string') {
+        msg = JSON.parse(data);
+      } else {
+        // Handle binary data if needed
+        const textDecoder = new TextDecoder('utf-8');
+        const jsonString = textDecoder.decode(data);
+        msg = JSON.parse(jsonString);
+      }
+      
+      console.log('Received message type:', msg.type || msg.kind);
+      
+      const kind = msg.type || msg.kind;
+      
+      if (kind === 'connection_established') {
+        setIsConnected(true);
+        setConnectionError(false);
+        return;
+      }
+
+      if (kind === 'connection_error' || kind === 'error') {
+        console.error('Server error:', msg.message);
+        setIsLoading(false);
+        setIsProcessing(false);
+        
+        if (msg.message && (
+            msg.message.includes('authentication') || 
+            msg.message.includes('Not authenticated') || 
+            msg.message.includes('token') || 
+            msg.message.includes('Invalid user')
+          )) {
+          console.log('Authentication error detected, attempting token refresh');
+          await refreshToken();
+        } else {
+          setMessages(m => [...m, { 
+            sender: 'assistant', 
+            text: msg.message.includes('conversation') ?
+              'Error with conversation. Please refresh the page to start a new session.' :
+              `Error: ${msg.message}`
+          }]);
+        }
+        return;
+      }
+      
+      // Handle ping response for keeping connection alive
+      if (kind === 'ping' || kind === 'pong') {
+        console.log('Received ping/pong');
+        return;
+      }
+
+      if (kind === 'status') {
+        setIsLoading(msg.status === 'thinking');
+        return;
+      }
+
+      if (kind === 'chat_message') {
+        setMessages(m => [...m, { sender: msg.sender, text: msg.text }]);
+        if (msg.sender === 'assistant') {
+          // Start a timeout to clear processing state
+          if (processingTimeoutRef.current) {
+            clearTimeout(processingTimeoutRef.current);
+          }
+          processingTimeoutRef.current = setTimeout(() => {
+            setIsLoading(false);
+            setIsProcessing(false);
+          }, 1000); // Give server time to complete processing
+        }
+        return;
+      }
+
+      if (kind === 'show_diff_modal') {
+        handleDiffMessage(msg);
+        return;
+      }
+    } catch (err) {
+      console.error('Error handling message:', err, data);
+    }
+  }, [handleDiffMessage, refreshToken]);
+
+  // Update the connectWebSocket function to use our message handler
   const connectWebSocket = useCallback(() => {
     if (!isComponentMounted.current) {
       console.log('Component not mounted, skipping connection');
@@ -115,8 +309,11 @@ export default function AIChat({ projectId, appName, filePath, onDiff }) {
           console.error('WebSocket state:', ws.readyState);
           cleanupWebSocket();
           
-          // Only attempt reconnect if we haven't reached max attempts
-          if (reconnectAttempts.current < maxReconnectAttempts && isComponentMounted.current) {
+          // Try to refresh token if we've failed several times
+          if (reconnectAttempts.current === 3) {
+            console.log('Attempting token refresh after multiple failures');
+            refreshToken();
+          } else if (reconnectAttempts.current < maxReconnectAttempts && isComponentMounted.current) {
             const delay = reconnectDelay * Math.pow(2, reconnectAttempts.current - 1);
             console.log(`Retrying in ${delay}ms...`);
             reconnectTimeoutRef.current = setTimeout(connectWebSocket, delay);
@@ -159,6 +356,14 @@ export default function AIChat({ projectId, appName, filePath, onDiff }) {
             }
           }, 5000); // Wait 5 seconds before starting ping interval
           
+          // Set up token refresh every 30 minutes
+          tokenRefreshTimeoutRef.current = setInterval(() => {
+            if (isComponentMounted.current) {
+              console.log('Scheduled token refresh');
+              refreshToken();
+            }
+          }, 30 * 60 * 1000); // 30 minutes
+          
           if (messages.length === 0) {
             const contextMsg = appName ? 
               `AI assistant connected. I'm focused on the ${appName} app. How can I help?` :
@@ -170,151 +375,8 @@ export default function AIChat({ projectId, appName, filePath, onDiff }) {
         }, 1000); // Wait 1 second before any UI updates or interactions
       };
 
-      // Use a local message handler to prevent closure issues
-      const handleMessage = async (e) => {
-        // Ensure component is still mounted
-        if (!isComponentMounted.current) return;
-        
-        let data = e.data;
-        console.log('Raw message received type:', typeof data);
-        
-        try {
-          // Check if message is a ping response
-          if (data === 'pong' || data === '{"type":"pong"}') {
-            console.log('Received pong');
-            return;
-          }
-          
-          // Parse the JSON message
-          let msg;
-          if (typeof data === 'string') {
-            msg = JSON.parse(data);
-          } else {
-            // Handle binary data if needed
-            const textDecoder = new TextDecoder('utf-8');
-            const jsonString = textDecoder.decode(data);
-            msg = JSON.parse(jsonString);
-          }
-          
-          console.log('Received message type:', msg.type || msg.kind);
-          
-          const kind = msg.type || msg.kind;
-          
-          if (kind === 'connection_established') {
-            setIsConnected(true);
-            setConnectionError(false);
-            return;
-          }
-
-          if (kind === 'connection_error' || kind === 'error') {
-            console.error('Server error:', msg.message);
-            setIsLoading(false);
-            setIsProcessing(false);
-            setMessages(m => [...m, { 
-              sender: 'assistant', 
-              text: msg.message.includes('conversation') ?
-                'Error with conversation. Please refresh the page to start a new session.' :
-                `Error: ${msg.message}`
-            }]);
-            return;
-          }
-          
-          // Handle ping response for keeping connection alive
-          if (kind === 'ping' || kind === 'pong') {
-            console.log('Received ping/pong');
-            return;
-          }
-
-          if (kind === 'status') {
-            setIsLoading(msg.status === 'thinking');
-            return;
-          }
-
-          if (kind === 'chat_message') {
-            setMessages(m => [...m, { sender: msg.sender, text: msg.text }]);
-            if (msg.sender === 'assistant') {
-              // Start a timeout to clear processing state
-              if (processingTimeoutRef.current) {
-                clearTimeout(processingTimeoutRef.current);
-              }
-              processingTimeoutRef.current = setTimeout(() => {
-                setIsLoading(false);
-                setIsProcessing(false);
-              }, 1000); // Give server time to complete processing
-            }
-            return;
-          }
-
-          if (kind === 'show_diff_modal') {
-            console.log('Handling show_diff_modal:', msg);
-            if (processingTimeoutRef.current) {
-                clearTimeout(processingTimeoutRef.current);
-            }
-            setIsLoading(false);
-            setIsProcessing(false);
-
-            try {
-                let formattedFiles = [];
-                const files = msg.files;
-                const diff = msg.diff || {};
-
-                if (Array.isArray(files)) {
-                    formattedFiles = files.map(file => {
-                        if (typeof file === 'object' && file.filePath) {
-                            return {
-                                ...file,
-                                filePath: file.filePath.replace(/^templates\//, ''),
-                                projectId,
-                                changeId: msg.change_id
-                            };
-                        }
-                        return {
-                            filePath: file.replace(/^templates\//, ''),
-                            fullPath: file,
-                            before: diff[file] || '',
-                            after: files[file] || diff[file] || '',
-                            projectId,
-                            changeId: msg.change_id
-                        };
-                    });
-                } else if (typeof files === 'object') {
-                    formattedFiles = Object.entries(files).map(([path, content]) => ({
-                        filePath: path.replace(/^templates\//, ''),
-                        fullPath: path,
-                        before: diff[path] || '',
-                        after: content || '',
-                        projectId,
-                        changeId: msg.change_id
-                    }));
-                }
-
-                if (!formattedFiles.length) {
-                    throw new Error('No files to review');
-                }
-
-                console.log('Formatted files for diff modal:', formattedFiles);
-                
-                // Call onDiff with the formatted data
-                onDiff({
-                    files: formattedFiles,
-                    previewMap: msg.previewMap || {},
-                    change_id: msg.change_id
-                });
-                
-                setChangeId(msg.change_id);
-                setStatus('review');
-            } catch (error) {
-                console.error('Error processing diff modal data:', error);
-                setMessages(m => [...m, { sender: 'assistant', text: `Error: ${error.message}` }]);
-            }
-          }
-        } catch (err) {
-          console.error('Error handling message:', err, data);
-        }
-      };
-
-      // Set message handler
-      ws.onmessage = handleMessage;
+      // Set our message handler
+      ws.onmessage = handleWebSocketMessage;
 
       ws.onerror = (e) => {
         if (!isComponentMounted.current) return;
@@ -357,13 +419,17 @@ export default function AIChat({ projectId, appName, filePath, onDiff }) {
         reconnectTimeoutRef.current = setTimeout(connectWebSocket, delay);
       }
     }
-  }, [projectId, appName, filePath, messages.length, cleanupWebSocket, reconnectDelay, maxReconnectAttempts, accessToken, onDiff]);
+  }, [accessToken, appName, cleanupWebSocket, filePath, handleWebSocketMessage, maxReconnectAttempts, messages.length, projectId, reconnectDelay, refreshToken]);
 
   // Initialize component
   useEffect(() => {
     console.log('Initializing AIChat component');
     isComponentMounted.current = true;
     reconnectAttempts.current = 0;
+    
+    // Don't auto-initialize diff from localStorage when chat component mounts
+    // only handle diffs when they're explicitly sent from the server
+    
     connectWebSocket();
 
     return () => {
@@ -371,7 +437,7 @@ export default function AIChat({ projectId, appName, filePath, onDiff }) {
       isComponentMounted.current = false;
       cleanupWebSocket();
     };
-  }, [connectWebSocket, cleanupWebSocket, accessToken]);
+  }, [connectWebSocket, cleanupWebSocket, accessToken, projectId]);
 
   // Scroll to bottom when messages change
   useEffect(() => {
@@ -489,59 +555,10 @@ export default function AIChat({ projectId, appName, filePath, onDiff }) {
     }
   }, [input, sendMessage]);
 
-  const confirm = () => {
-    if (!changeId) return;
-
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
-      setMessages(m => [...m, { sender: 'assistant', text: 'Reconnecting before applying changes...' }]);
-      connectWebSocket();
-      setTimeout(() => {
-        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-          doConfirm();
-        } else {
-          setMessages(m => [...m, { sender: 'assistant', text: 'Cannot connect to server. Please try again.' }]);
-          setConnectionError(true);
-        }
-      }, 1000);
-      return;
-    }
-
-    doConfirm();
-  };
-
-  const doConfirm = () => {
-    console.log('Confirming change:', changeId);
-    try {
-      wsRef.current.send(JSON.stringify({ type: 'confirm_changes', change_id: changeId }));
-      setStatus('open');
-      setChangeId(null);
-      setMessages(m => [...m, { sender: 'assistant', text: 'Changes applied successfully.' }]);
-    } catch (err) {
-      console.error('Error confirming changes:', err);
-      setMessages(m => [...m, { sender: 'assistant', text: 'Error applying changes. Please try reconnecting.' }]);
-      setConnectionError(true);
-    }
-  };
-
-  const cancel = () => {
-    if (!changeId) return;
-    console.log('Canceling change:', changeId);
-    axios
-      .post(
-        `/api/ai/conversations/${changeId}/cancel/`,
-        {},
-        { headers: { Authorization: `Bearer ${localStorage.getItem('access_token')}` } }
-      )
-      .then(() => {
-        setStatus('open');
-        setChangeId(null);
-        setMessages(m => [...m, { sender: 'assistant', text: 'Changes discarded.' }]);
-      })
-      .catch(err => {
-        console.error('Error canceling:', err);
-        setMessages(m => [...m, { sender: 'assistant', text: `Error discarding: ${err.message}` }]);
-      });
-  };
+  // Skip rendering UI for hidden instances
+  if (hiddenInstance) {
+    return null;
+  }
 
   return (
     <div className="ai-chat-widget">
@@ -561,25 +578,18 @@ export default function AIChat({ projectId, appName, filePath, onDiff }) {
         <div ref={messagesEnd} />
       </div>
 
-      {status === 'review' && (
-        <div className="review-buttons">
-          <button onClick={confirm}>Apply Changes</button>
-          <button onClick={cancel}>Cancel</button>
-        </div>
-      )}
-
       <div className="input-row">
         <input
           value={input}
           onChange={e => setInput(e.target.value)}
           onKeyDown={handleInputSubmit}
           placeholder="Ask AI to modify..."
-          disabled={!isConnected || isLoading || status === 'review'}
+          disabled={!isConnected || isLoading}
         />
         <button
           className="send-btn"
           onClick={() => sendMessage(input)}
-          disabled={!isConnected || isLoading || status === 'review'}
+          disabled={!isConnected || isLoading}
         >
           Send
         </button>

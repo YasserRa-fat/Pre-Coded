@@ -62,7 +62,7 @@ class FileIndexer:
         alt_path = path.replace('/', '\\')
         
         # Log both representations for debugging
-        logger.debug(f"Normalized path: '{path}' (alt: '{alt_path}')")
+        # logger.debug(f"Normalized path: '{path}' (alt: '{alt_path}')")
         
         return path
 
@@ -208,7 +208,7 @@ class FileIndexer:
         
         # Normalize the search path
         search_path = cls._normalize_path(path)
-        logger.debug(f"Normalized search path: '{search_path}'")
+        # logger.debug(f"Normalized search path: '{search_path}'")
         
         # First try direct lookup with normalized path
         if search_path in index['path_to_instance']:

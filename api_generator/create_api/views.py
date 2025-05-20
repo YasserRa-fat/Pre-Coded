@@ -1785,8 +1785,24 @@ def generate_diff_data(project_id, change_id, preview_alias, raw_label, modified
     for path in modified_files:
         # Original content
         original_content = FileIndexer.get_content(path) or ''
-        # Updated content
-        updated_content = diff.get(path, original_content)
+        
+        # Updated content - make sure we're getting the complete file, not just changes
+        if path in diff:
+            if isinstance(diff[path], dict) and 'after' in diff[path]:
+                # If the diff has a structured format with before/after
+                updated_content = diff[path]['after']
+            else:
+                # If the diff directly contains the updated content
+                updated_content = diff[path]
+        else:
+            updated_content = original_content
+            
+        # Ensure the updated content is complete (not fragments)
+        if updated_content and path.endswith('.html') and ('analytics' in original_content.lower() or 'chart' in original_content.lower()):
+            # If it's an analytics template, ensure proper structure
+            if '{% extends' not in updated_content and '<html' not in updated_content.lower():
+                logger.info(f"Adding template structure to analytics content in {path}")
+                updated_content = "{% extends 'base.html' %}\n\n{% block content %}\n" + updated_content + "\n{% endblock %}"
         
         files.append({
             'filePath': path,

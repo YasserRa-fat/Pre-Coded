@@ -669,13 +669,22 @@ async def refine_request(conversation, user_message) -> dict:
 async def make_initial_ai_call(conversation, text, files_data):
     """Make initial AI call with project context and file data"""
     try:
-        logger.info("Starting make_initial_ai_call")
         logger.debug(f"Input - conversation: {conversation.id}, text length: {len(text)}")
         logger.debug(f"Files data keys: {list(files_data.keys())}")
         
         # Extract the actual file structure for the AI
         project_context = files_data.get('project_context', {})
         project_id = files_data.get('project_id')
+        
+        # Get list of existing view files
+        existing_views = []
+        if 'views' in project_context:
+            existing_views = [view['path'] for view in project_context['views']]
+        logger.debug(f"Existing view files: {existing_views}")
+        
+        # Check if this is an analytics-related request
+        is_analytics_feature = any(keyword in text.lower() for keyword in 
+                                   ['analytics', 'graph', 'chart', 'visualize', 'dashboard', 'statistics'])
         
         # Log project_context structure for debugging
         if project_context:
@@ -685,6 +694,22 @@ async def make_initial_ai_call(conversation, text, files_data):
         else:
             logger.warning("Project context is empty!")
         
+        # Add analytics-specific instructions if needed
+        analytics_instructions = ""
+        if is_analytics_feature:
+            analytics_instructions = """
+ANALYTICS FEATURE INSTRUCTIONS:
+1. ONLY use EXISTING view files - DO NOT create new ones
+2. For graphs/charts, include:
+   - JavaScript files with proper chart library integration
+   - Use existing view files to add data fetching functions
+   - Complete template files that render the analytics UI
+3. Structure view functions to properly query data for the time period specified
+4. Ensure all imports are included based on the analytics functionality needed
+5. When showing analytics "for the past 10 days", ensure data is properly filtered
+6. Include proper data aggregation using Django's ORM functions
+"""
+
         # Create the prompt with properly escaped JSON example
         prompt = f"""
 You are a Django AI assistant. Analyze the request and generate necessary file changes.
@@ -692,11 +717,23 @@ Project Context:
 - Project ID: {project_id}
 - App Name: {files_data.get('app_name')}
 - User Request: {text}
+- Existing View Files: {', '.join(existing_views)}
+
+CRITICAL INSTRUCTIONS:
+1. ONLY use EXISTING view files - NEVER create new ones
+2. Available view files are: {', '.join(existing_views)}
+3. For analytics, add functions to EXISTING view files only
+4. For EACH file, return the COMPLETE file content, not just the changes
+5. When handling graphs or charts, include JS files for rendering AND use existing view files for data
+6. EVERY file in the response must be a COMPLETE file, not partial content
+7. DO NOT create new view files - modify existing ones only
+{analytics_instructions}
 
 CRITICAL: YOU MUST RETURN ONLY A VALID JSON OBJECT WITH THIS EXACT STRUCTURE:
 {{
     "files": {{
-        "filename.html": "complete file content",
+        "filename.html": "complete file content with your changes",
+        "existing_app/views.py": "complete file content with your changes",
         "static/js/filename.js": "complete file content"
     }},
     "description": "Brief description of changes",
@@ -713,6 +750,7 @@ FORMATTING RULES:
 4. Template files use just filename
 5. Static files use full path
 6. NO explanatory text before or after JSON
+7. ONLY use view files from this list: {', '.join(existing_views)}
 """
         logger.debug("Generated prompt for initial AI call")
         
@@ -725,6 +763,27 @@ FORMATTING RULES:
             )
             logger.info("Successfully received AI response")
             logger.debug(f"Response length: {len(response) if response else 0}")
+            
+            # Validate response to ensure no new view files are created
+            try:
+                response_data = json.loads(response)
+                if 'files' in response_data:
+                    # Filter out any non-existing view files
+                    files_to_remove = []
+                    for file_path in response_data['files'].keys():
+                        if file_path.endswith('views.py') and file_path not in existing_views:
+                            logger.warning(f"Removing non-existing view file from response: {file_path}")
+                            files_to_remove.append(file_path)
+                    
+                    # Remove non-existing view files
+                    for file_path in files_to_remove:
+                        del response_data['files'][file_path]
+                    
+                    # Re-serialize the filtered response
+                    response = json.dumps(response_data)
+            except json.JSONDecodeError:
+                logger.error("Failed to validate response JSON")
+            
             return response
             
         except Exception as api_error:
@@ -803,7 +862,7 @@ def parse_descriptive_format(text: str) -> dict:
             # For templates, ensure we only use the filename
             if file_type == 'templates' or file_path.endswith('.html'):
                 file_path = os.path.basename(file_path)
-                logger.debug(f"Normalized template path to: {file_path}")
+                # logger.debug(f"Normalized template path to: {file_path}")
             
             # Extract content hints from bullet points
             content_hints = re.findall(r'(?m)^\s*-\s*(.+)$', section_text)
@@ -1018,7 +1077,7 @@ async def validate_json_with_ai(json_text: str) -> Optional[str]:
         logger.error(f"Error in validate_json_with_ai: {str(e)}")
         return None
 
-def sanitize_ai_response(response_text: str) -> str:
+async def sanitize_ai_response(response_text: str, detect_analytics=False, request_text=None) -> str:
     """
     Sanitize AI response to ensure valid JSON for parsing.
     This function now uses the centralized JSONValidator.
@@ -1030,17 +1089,7 @@ def sanitize_ai_response(response_text: str) -> str:
     logger.debug(f"Input first 200 chars: {response_text[:200]}")
     
     # Use the new JSONValidator for cleaning and validation
-    is_valid, cleaned_response, error_msg = JSONValidator.validate_and_parse(response_text)
-    
-    if is_valid and cleaned_response:
-        return json.dumps(cleaned_response)
-    
-    # Try fallback regex extraction if JSON parsing fails
-    extracted = JSONValidator.extract_json_with_regex(response_text)
-    if extracted:
-        return json.dumps(extracted)
-        
-    return ''
+    return await JSONValidator.sanitize_ai_response(response_text, detect_analytics, request_text)
 
 async def call_ai_multi_file(conversation, text, files_data):
     """Call AI service for multiple file changes with validation and refinement."""
@@ -1053,6 +1102,16 @@ async def call_ai_multi_file(conversation, text, files_data):
         logger.info(f"Project ID: {files_data.get('project_id')}")
         logger.info(f"App name: {files_data.get('app_name')}")
         
+        # Debug project context structure
+        logger.debug("=== Project Context Structure ===")
+        for key, value in project_context.items():
+            if isinstance(value, list):
+                logger.debug(f"{key}: {len(value)} items")
+                if value:
+                    logger.debug(f"First item sample: {value[0]}")
+            else:
+                logger.debug(f"{key}: {type(value)}")
+        
         response = {
             'files': {},
             'metadata': {
@@ -1062,6 +1121,11 @@ async def call_ai_multi_file(conversation, text, files_data):
             },
             'selected_files': []
         }
+
+        # Check if this is an analytics-related request
+        is_analytics_feature = any(keyword in text.lower() for keyword in ['analytics', 'graph', 'chart', 'visualize', 'dashboard'])
+        if is_analytics_feature:
+            logger.info("Detected analytics feature request in call_ai_multi_file")
 
         # Make initial AI call
         initial_response = await make_initial_ai_call(conversation, text, files_data)
@@ -1073,7 +1137,7 @@ async def call_ai_multi_file(conversation, text, files_data):
         logger.debug(f"Raw initial response: {initial_response[:500]}...")
         
         # Sanitize the response before parsing
-        sanitized_response = sanitize_ai_response(initial_response)
+        sanitized_response = await sanitize_ai_response(initial_response, detect_analytics=is_analytics_feature, request_text=text)
         logger.debug(f"Sanitized AI response: {sanitized_response[:500]}...")
         
         # Parse the response
@@ -1092,23 +1156,62 @@ async def call_ai_multi_file(conversation, text, files_data):
             
             # Get existing files from project context
             existing_files = set()
+            if 'views' in project_context:
+                logger.debug("=== Views in Project Context ===")
+                for view in project_context['views']:
+                    view_path = view.get('path', '')
+                    logger.debug(f"View path from context: {view_path}")
+                    existing_files.add(view_path)
+            
             if 'templates' in project_context:
                 existing_files.update(t['name'] for t in project_context['templates'])
-            for path in project_context.keys():
-                if isinstance(path, str):
-                    existing_files.add(path)
+            
+            # Debug existing files
+            logger.debug("=== All Existing Files ===")
+            for file_path in existing_files:
+                logger.debug(f"Existing file: {file_path}")
             
             # Process each file
             for file_path, content in files.items():
                 logger.info(f"Processing file: {file_path}")
                 
+                # Debug file path normalization
+                logger.debug(f"=== File Path Normalization for {file_path} ===")
+                logger.debug(f"Original path: {file_path}")
+                
                 # Normalize path but preserve app prefix
                 norm_path = normalize_template_path(file_path)
-                logger.info(f"Normalized path: {norm_path}")
+                logger.debug(f"After template normalization: {norm_path}")
+                
+                # Additional normalization for views
+                if file_path.endswith('views.py'):
+                    logger.debug("Processing view file path")
+                    # Try different path variations
+                    variations = [
+                        file_path,
+                        f"{file_path.split('/')[0]}/views.py",  # app/views.py format
+                        norm_path
+                    ]
+                    logger.debug(f"Trying view path variations: {variations}")
+                    
+                    # Check each variation
+                    for var in variations:
+                        if var in existing_files:
+                            norm_path = var
+                            logger.debug(f"Found matching view path: {norm_path}")
+                            break
                 
                 # Check if file exists or is a new static/media file
                 is_new_static = file_path.startswith(('static/', 'media/'))
                 file_exists = norm_path in existing_files or file_path in existing_files
+                
+                logger.debug("=== File Existence Check ===")
+                logger.debug(f"Normalized path: {norm_path}")
+                logger.debug(f"Original path: {file_path}")
+                logger.debug(f"Is static/media: {is_new_static}")
+                logger.debug(f"Exists in project: {file_exists}")
+                logger.debug(f"Exists as norm_path: {norm_path in existing_files}")
+                logger.debug(f"Exists as original: {file_path in existing_files}")
                 
                 if not file_exists and not is_new_static:
                     logger.warning(f"Selected file {file_path} not found in project")
@@ -1426,7 +1529,7 @@ def validate_and_map_files(selected_files, project_files):
             
             # Normalize the selected path
             norm_path = normalize_template_path(selected_path)
-            logger.debug(f"Normalized path: {norm_path}")
+            # logger.debug(f"Normalized path: {norm_path}")
             
             # Try direct match first
             if norm_path in project_files:

@@ -11,24 +11,21 @@
   display: flex;
   justify-content: center;
   align-items: center;
-  z-index: 9999; /* Ensure it's above other content */
-  padding: 0; /* Remove padding to maximize space */
-  box-sizing: border-box;
+  z-index: 100000;
+  pointer-events: all;
 }
 
 /* 2) The diff-modal itself */
 .diff-modal {
+  position: relative;
   background: white;
-  border-radius: 0; /* Remove border radius for full-screen effect */
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
-  width: 100vw; /* Full viewport width */
-  max-width: 100%; /* No max-width constraints */
-  height: 100vh; /* Full viewport height */
+  width: 100vw;
+  height: 100vh;
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  position: relative;
-  margin: 0;
+  z-index: 100001;
+  pointer-events: all;
 }
 
 /* Remove any inherited .modal-content constraints */
@@ -45,14 +42,13 @@
 
 /* 3) Header */
 .modal-header {
-  padding: 0.75rem 1rem;
-  border-bottom: 1px solid #ddd;
   display: flex;
   justify-content: space-between;
   align-items: center;
+  padding: 1rem;
   background: #2c3e50;
   color: white;
-  flex-shrink: 0; /* Prevent header from shrinking */
+  z-index: 100002;
 }
 
 .modal-header h3 {
@@ -65,63 +61,40 @@
 .close-btn {
   background: none;
   border: none;
-  font-size: 1.75rem;
+  color: white;
+  font-size: 1.5rem;
   cursor: pointer;
-  color: rgba(255, 255, 255, 0.8);
   padding: 0.5rem;
-  transition: all 0.2s;
-  border-radius: 50%;
-  width: 40px;
-  height: 40px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  margin-left: 1rem;
+  z-index: 100003;
 }
 
 .close-btn:hover {
-  background-color: rgba(255, 255, 255, 0.1);
-  color: white;
+  opacity: 0.8;
 }
 
 /* View Mode Toggle */
 .view-mode-toggle {
   display: flex;
   justify-content: center;
-  padding: 0.75rem;
-  background: #f0f3f5;
+  padding: 1rem;
+  background: #f8f9fa;
   border-bottom: 1px solid #ddd;
+  z-index: 100002;
 }
 
 .toggle-btn {
-  padding: 0.6rem 1.5rem;
-  background: #f8f9fa;
+  padding: 0.75rem 1.5rem;
+  background: none;
   border: 1px solid #ddd;
   cursor: pointer;
   font-size: 0.95rem;
-  font-weight: 500;
   transition: all 0.2s;
-  min-width: 140px;
-}
-
-.toggle-btn:first-child {
-  border-radius: 4px 0 0 4px;
-  border-right: none;
-}
-
-.toggle-btn:last-child {
-  border-radius: 0 4px 4px 0;
 }
 
 .toggle-btn.active {
   background: #2c3e50;
-  border-color: #2c3e50;
   color: white;
-  z-index: 1;
-}
-
-.toggle-btn:hover:not(.active) {
-  background: #e9ecef;
+  border-color: #2c3e50;
 }
 
 /* New Main Layout */
@@ -130,39 +103,29 @@
   grid-template-columns: 250px 1fr;
   flex: 1;
   overflow: hidden;
+  background: #f8f9fa;
   gap: 1rem;
   padding: 1rem;
-  background: #f8f9fa;
 }
 
 /* Content Area */
 .content-area {
+  background: white;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  overflow: hidden;
   display: flex;
   flex-direction: column;
-  overflow: hidden;
-  height: 100%;
 }
 
 /* File List Section */
 .file-list-section {
-  grid-column: 1;
-  background: #fff;
-  border-radius: 6px;
+  background: white;
   border: 1px solid #ddd;
+  border-radius: 4px;
+  overflow: hidden;
   display: flex;
   flex-direction: column;
-  overflow: hidden;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
-}
-
-.file-list-section h4 {
-  margin: 0;
-  padding: 1rem;
-  background: #2c3e50;
-  color: white;
-  font-weight: 600;
-  font-size: 1rem;
-  border-bottom: 1px solid #ddd;
 }
 
 .file-list {
@@ -174,20 +137,16 @@
   padding: 0.75rem 1rem;
   border-bottom: 1px solid #eee;
   cursor: pointer;
-  transition: all 0.2s;
-  font-size: 0.9rem;
-  word-break: break-word;
-  color: #333;
+  transition: background 0.2s;
 }
 
 .file-item:hover {
-  background-color: #f0f7ff;
+  background: #f0f7ff;
 }
 
 .file-item.selected {
-  background-color: #3498db;
+  background: #3498db;
   color: white;
-  font-weight: 500;
 }
 
 /* File Diff Section */
@@ -213,8 +172,8 @@
 
 .diff-container {
   display: flex;
-  overflow: hidden;
   flex: 1;
+  overflow: hidden;
 }
 
 .diff-pane {
@@ -242,15 +201,25 @@
 .diff-content {
   flex: 1;
   overflow: auto;
-  margin: 0;
-  padding: 0;
-  font-family: 'Fira Code', 'Source Code Pro', Consolas, Monaco, 'Andale Mono', monospace;
-  font-size: 0.9rem;
+  padding: 1rem;
+  font-family: monospace;
+  font-size: 14px;
   line-height: 1.5;
-  background-color: #1e1e1e;
+  background: #1e1e1e;
   color: #d4d4d4;
   white-space: pre;
-  counter-reset: line;
+}
+
+.diff-content.selectable,
+.diff-content.selectable *,
+.diff-line,
+.diff-line-content {
+  cursor: text;
+  user-select: text;
+  -webkit-user-select: text;
+  -moz-user-select: text;
+  -ms-user-select: text;
+  pointer-events: auto;
 }
 
 .diff-line {
@@ -259,6 +228,8 @@
   position: relative;
   display: flex;
   align-items: stretch;
+  user-select: text;
+  cursor: text;
 }
 
 .diff-line-number {
@@ -281,6 +252,8 @@
 .diff-line-content {
   padding: 0 1rem;
   white-space: pre;
+  user-select: text;
+  cursor: text;
 }
 
 .diff-pane.before .diff-content {
@@ -327,6 +300,10 @@
   overflow: hidden;
   background: white;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+  pointer-events: auto;
+  position: relative;
+  z-index: 100002; /* Higher than modal */
+  isolation: isolate;
 }
 
 .preview-section h4 {
@@ -336,6 +313,7 @@
   color: white;
   font-weight: 600;
   font-size: 1rem;
+  user-select: none;
 }
 
 /* 4) Body: two equal panes */
@@ -377,73 +355,153 @@
   border: none;
   min-height: 0; /* Allow iframe to shrink */
   background: #fff;
+  pointer-events: auto;
 }
 
+/* Preview Loading State */
 .preview-loading {
-  padding: 2rem;
-  text-align: center;
-  color: #666;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
-  height: 100%;
-  font-size: 1.1rem;
-}
-
-.preview-error {
   padding: 1rem;
   text-align: center;
-  color: #721c24;
-  background: #f8d7da;
-  border: 1px solid #f5c6cb;
-  margin: 0.5rem;
-  font-size: 0.95rem;
+  background-color: #f5f5f5;
+  border: 1px solid #e0e0e0;
   border-radius: 4px;
+  margin: 1rem;
+  min-height: 200px;
+}
+
+.preview-loading p {
+  margin-top: 1rem;
+  color: #666;
+  font-size: 0.95rem;
+}
+
+.loading-spinner {
+  border: 3px solid #f3f3f3;
+  border-top: 3px solid #3498db;
+  border-radius: 50%;
+  width: 30px;
+  height: 30px;
+  animation: spin 1s linear infinite;
+  margin-bottom: 1rem;
+}
+
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+.retry-btn {
+  background-color: #2196f3;
+  color: white;
+  border: none;
+  padding: 8px 16px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 14px;
+  transition: background-color 0.2s;
+}
+
+.retry-btn:hover {
+  background-color: #1976d2;
+}
+
+.retry-btn:active {
+  background-color: #0d47a1;
+}
+
+.preview-iframe {
+  width: 100%;
+  height: 100%;
+  min-height: 400px;
+  border: 1px solid #e0e0e0;
+  border-radius: 4px;
+}
+
+.preview-pane {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  margin: 0 1rem;
+}
+
+.preview-comparison {
+  display: flex;
+  gap: 1rem;
+  margin-top: 1rem;
+}
+
+.preview-section h4 {
+  margin-bottom: 1rem;
+  color: #333;
+}
+
+.preview-pane h5 {
+  margin-bottom: 0.5rem;
+  color: #666;
+  font-weight: 500;
+}
+
+/* Preview Error State */
+.preview-error {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  text-align: center;
+  background-color: #fff3f3;
+  border: 1px solid #ffcdd2;
+  border-radius: 4px;
+  margin: 1rem;
+  min-height: 200px;
+}
+
+.preview-error p {
+  color: #d32f2f;
+  margin-bottom: 1rem;
 }
 
 /* 5) Footer */
 .modal-footer {
-  padding: 1.25rem 1.5rem;
-  border-top: 1px solid #ddd;
+  padding: 1rem;
   display: flex;
   justify-content: flex-end;
   gap: 1rem;
   background: #f8f9fa;
-  flex-shrink: 0; /* Prevent footer from shrinking */
+  border-top: 1px solid #ddd;
+  z-index: 100002;
+}
+
+.primary-btn,
+.secondary-btn {
+  padding: 0.75rem 1.5rem;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-weight: 500;
+  transition: all 0.2s;
 }
 
 .primary-btn {
-  padding: 0.75rem 1.5rem;
   background: #2c3e50;
   color: white;
-  border: none;
-  border-radius: 6px;
-  cursor: pointer;
-  transition: all 0.2s;
-  font-size: 1rem;
-  font-weight: 500;
 }
 
-.primary-btn:hover {
+.primary-btn:hover:not(:disabled) {
   background: #1a252f;
-  transform: translateY(-1px);
 }
 
 .secondary-btn {
-  padding: 0.75rem 1.5rem;
   background: #6c757d;
   color: white;
-  border: none;
-  border-radius: 6px;
-  cursor: pointer;
-  transition: all 0.2s;
-  font-size: 1rem;
-  font-weight: 500;
 }
 
-.secondary-btn:hover {
+.secondary-btn:hover:not(:disabled) {
   background: #5a6268;
-  transform: translateY(-1px);
 }
 
 /* Responsive adjustments */
@@ -582,7 +640,7 @@
   flex-direction: column;
   justify-content: center;
   align-items: center;
-  z-index: 1000;
+  z-index: 100004;
 }
 
 .processing-spinner {
@@ -592,7 +650,6 @@
   border-top: 5px solid #3498db;
   border-radius: 50%;
   animation: spin 1s linear infinite;
-  margin-bottom: 1rem;
 }
 
 @keyframes spin {
@@ -612,4 +669,135 @@ button:disabled {
   background-color: #ccc;
   border-color: #bbb;
   color: #666;
+}
+
+/* Add these new styles */
+.diff-modal * {
+  pointer-events: auto;
+}
+
+.diff-content,
+.file-list,
+.preview-section,
+.modal-header,
+.modal-footer,
+.view-mode-toggle,
+.diff-layout,
+.content-area {
+  pointer-events: auto !important;
+}
+
+.file-item,
+.toggle-btn,
+.close-btn,
+.primary-btn,
+.secondary-btn {
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  -moz-user-select: none;
+  -ms-user-select: none;
+}
+
+/* Ensure processing overlay doesn't interfere with clicks */
+.processing-overlay > * {
+  pointer-events: auto;
+}
+
+/* Ensure all interactive containers have proper pointer events */
+.modal-header,
+.modal-footer,
+.diff-layout,
+.file-list-section,
+.content-area,
+.diff-container,
+.preview-section,
+.view-mode-toggle {
+  pointer-events: all !important;
+}
+
+/* Ensure all interactive elements have proper pointer events */
+.close-btn,
+.toggle-btn,
+.file-item,
+.primary-btn,
+.secondary-btn,
+.diff-content,
+.preview-iframe {
+  pointer-events: all !important;
+  cursor: pointer;
+}
+
+/* Prevent text selection on buttons */
+.close-btn,
+.toggle-btn,
+.primary-btn,
+.secondary-btn {
+  user-select: none;
+  -webkit-user-select: none;
+  -moz-user-select: none;
+  -ms-user-select: none;
+}
+
+/* Prevent modal from being affected by outside events */
+.diff-modal,
+.modal-header,
+.modal-footer,
+.diff-layout,
+.file-list-section,
+.content-area,
+.diff-container,
+.preview-section,
+.view-mode-toggle {
+  isolation: isolate;
+}
+
+/* Ensure all interactive containers have proper isolation */
+.modal-header,
+.modal-footer,
+.diff-layout,
+.file-list-section,
+.content-area,
+.diff-container,
+.preview-section,
+.view-mode-toggle {
+  position: relative;
+  z-index: 100002; /* Higher than modal */
+  isolation: isolate;
+}
+
+/* Ensure buttons and interactive elements work properly */
+.close-btn,
+.toggle-btn,
+.primary-btn,
+.secondary-btn {
+  position: relative;
+  z-index: 100003; /* Higher than containers */
+  cursor: pointer !important;
+  pointer-events: all !important;
+}
+
+/* Prevent text selection on UI elements */
+.modal-header,
+.view-mode-toggle,
+.file-list-section h4,
+.modal-footer {
+  user-select: none;
+  -webkit-user-select: none;
+  -moz-user-select: none;
+  -ms-user-select: none;
+}
+
+/* Ensure all interactive elements have proper pointer events */
+.modal-overlay *,
+.diff-modal *,
+.modal-header *,
+.modal-footer *,
+.diff-layout *,
+.file-list-section *,
+.content-area *,
+.diff-container *,
+.preview-section *,
+.view-mode-toggle * {
+  pointer-events: all;
 }

@@ -160,6 +160,14 @@ class PatchRegisterAndLoginMiddleware:
                         super().confirm_login_allowed(user)
                 view_cls.authentication_form = ProjectAuthForm
 
+                # Store original form_invalid
+                orig_invalid = getattr(view_cls, 'form_invalid', None)
+                if orig_invalid:
+                    def form_invalid(self, form):
+                        messages.error(self.request, "Invalid username or password")
+                        return super(view_cls, self).form_invalid(form)
+                    view_cls.form_invalid = form_invalid
+
                 # Patch form_valid to record alias
                 orig_val = view_cls.form_valid
                 def form_valid(self, form):

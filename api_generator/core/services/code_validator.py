@@ -124,7 +124,7 @@ class DjangoCodeValidator:
         # Ensure path starts with /
         if not normalized.startswith('/'):
             normalized = '/' + normalized
-        logger.debug(f"Normalized path: {normalized}")
+        # logger.debug(f"Normalized path: {normalized}")
         return normalized
         
     def _validate_basic_syntax(self, file_path: str, content: str) -> Tuple[bool, List[str]]:

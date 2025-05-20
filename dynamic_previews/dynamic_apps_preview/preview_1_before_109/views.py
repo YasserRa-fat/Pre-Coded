@@ -75,8 +75,7 @@ class Login(LoginView):
 
     def form_invalid(self, form):
         messages.error(self.request, "Invalid Login")
-        response = self.form_invalid(form)
-        return self.render_to_response(response)
+        return super().form_invalid(form)
 
 
 class RegisterView(FormView):

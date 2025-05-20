@@ -146,12 +146,12 @@ urlpatterns.append(
     path('projects/<int:project_id>/preview/run/',
          PreviewRunAPIView.as_view(), name='preview-run'),
 )
-# urlpatterns.append(
-#     path(
-#         f"projects/{pid}/",
-#         include((exec_globals["urlpatterns"], namespace)),
-#     )
-# )
+urlpatterns.append(
+    path(
+        f"projects/{pid}/",
+        include((exec_globals["urlpatterns"], namespace)),
+    )
+)
 
 # Debug output
 # print("✅ Final URL patterns:")

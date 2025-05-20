@@ -1,4 +1,3 @@
-import axios from 'axios';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import './css/DiffModal.css';
 
@@ -155,14 +154,16 @@ export default function DiffModal({
   token,
   onApply,
   onCancel,
-  onClose,
+  onClose = () => {},
+  isModalOpen,
+  previewUrls = {},
 }) {
-  console.log('DiffModal rendered with:', { projectId, changeId, files });
+  console.log('DiffModal rendered with:', { projectId, changeId, files, previewUrls });
   
   const [beforeUrl, setBeforeUrl] = useState(null);
   const [afterUrl, setAfterUrl] = useState(null);
-  const [loadingBefore, setLoadingBefore] = useState(true);
-  const [loadingAfter, setLoadingAfter] = useState(true);
+  const [loadingBefore, setLoadingBefore] = useState(false);
+  const [loadingAfter, setLoadingAfter] = useState(false);
   const [beforeError, setBeforeError] = useState(null);
   const [afterError, setAfterError] = useState(null);
   const [selectedFileIndex, setSelectedFileIndex] = useState(0);
@@ -170,40 +171,33 @@ export default function DiffModal({
   const [isProcessing, setIsProcessing] = useState(false);
   const modalRef = useRef(null);
 
-  // Prevent accidental closing during processing
-  const handleClose = useCallback(() => {
-    if (isProcessing) {
-      if (window.confirm('Changes are still being processed. Are you sure you want to close?')) {
-        onClose();
-      }
-    } else {
-      onClose();
-    }
-  }, [isProcessing, onClose]);
+  // Handle click outside
+  useEffect(() => {
+    const handleClickOutside = (event) => {
+      // Prevent closing on any outside click
+      // Only close via the explicit X button
+      return;
+    };
+
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [onClose]);
 
   // Handle escape key
   useEffect(() => {
-    const handleEscape = (e) => {
-      if (e.key === 'Escape') {
-        handleClose();
-      }
+    const handleEscape = (event) => {
+      // Prevent closing on escape key
+      // Only close via the explicit X button
+      return;
     };
-    
-    window.addEventListener('keydown', handleEscape);
-    return () => window.removeEventListener('keydown', handleEscape);
-  }, [handleClose]);
 
-  // Handle click outside modal
-  useEffect(() => {
-    const handleClickOutside = (e) => {
-      if (modalRef.current && !modalRef.current.contains(e.target)) {
-        handleClose();
-      }
+    document.addEventListener('keydown', handleEscape);
+    return () => {
+      document.removeEventListener('keydown', handleEscape);
     };
-    
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, [handleClose]);
+  }, [onClose]);
 
   const handleApply = useCallback(async () => {
     try {
@@ -223,52 +217,41 @@ export default function DiffModal({
     }
   }, [onCancel]);
 
-  // Fetch the two preview URLs on mount
+  // Use provided preview URLs
   useEffect(() => {
-    const BACKEND = process.env.REACT_APP_BACKEND_URL || 'http://localhost:8000';
-    const headers = { Authorization: `Bearer ${token}` };
-    console.log('[DiffModal] Loading previews for change:', changeId);
-    
-    // Before preview
-    setLoadingBefore(true);
-    setBeforeError(null);
-    axios
-      .post(
-        `${BACKEND}/api/projects/${projectId}/preview/run/`,
-        { mode: 'before' },
-        { headers }
-      )
-      .then(res => {
-        console.log('[DiffModal] Before preview URL:', res.data.url);
-        setBeforeUrl(res.data.url);
-        setLoadingBefore(false);
-      })
-      .catch(err => {
-        console.error('[DiffModal] Error loading before preview:', err);
-        setBeforeError(`Error loading before preview: ${err.message}`);
-        setLoadingBefore(false);
-      });
+    if (!projectId || !changeId) {
+      console.debug('[DiffModal] Missing required params:', { projectId, changeId });
+      return;
+    }
 
-    // After preview  
-    setLoadingAfter(true);
-    setAfterError(null);
-    axios
-      .post(
-        `${BACKEND}/api/projects/${projectId}/preview/run/`,
-        { mode: 'after', change_id: changeId },
-        { headers }
-      )
-      .then(res => {
-        console.log('[DiffModal] After preview URL:', res.data.url);
-        setAfterUrl(res.data.url);
-        setLoadingAfter(false);
-      })
-      .catch(err => {
-        console.error('[DiffModal] Error loading after preview:', err);
-        setAfterError(`Error loading after preview: ${err.message}`);
-        setLoadingAfter(false);
-      });
-  }, [projectId, changeId, token]);
+    const BACKEND = process.env.REACT_APP_BACKEND_URL || 'http://localhost:8000';
+    
+    // Set URLs from previewMap
+    if (previewUrls.before) {
+      const beforeFullUrl = previewUrls.before.startsWith('http') 
+        ? previewUrls.before 
+        : `${BACKEND}${previewUrls.before}`;
+      setBeforeUrl(beforeFullUrl);
+      setLoadingBefore(false);
+    }
+    
+    if (previewUrls.after) {
+      const afterFullUrl = previewUrls.after.startsWith('http') 
+        ? previewUrls.after 
+        : `${BACKEND}${previewUrls.after}`;
+      setAfterUrl(afterFullUrl);
+      setLoadingAfter(false);
+    }
+
+    return () => {
+      setBeforeUrl(null);
+      setAfterUrl(null);
+      setBeforeError(null);
+      setAfterError(null);
+      setLoadingBefore(false);
+      setLoadingAfter(false);
+    };
+  }, [projectId, changeId, previewUrls]);
 
   const renderFileList = () => {
     if (!files || files.length === 0) return null;
@@ -317,6 +300,8 @@ export default function DiffModal({
   };
 
   const renderPreview = () => {
+    const BACKEND = process.env.REACT_APP_BACKEND_URL || 'http://localhost:8000';
+    
     return (
       <div className="preview-section">
         <h4>Live Preview</h4>
@@ -324,36 +309,98 @@ export default function DiffModal({
           <div className="preview-pane">
             <h5>Before</h5>
             {beforeError ? (
-              <div className="preview-error">{beforeError}</div>
+              <div className="preview-error">
+                <p>{beforeError}</p>
+                <button 
+                  className="retry-btn"
+                  onClick={() => {
+                    setBeforeError(null);
+                    const beforeFullUrl = previewUrls.before.startsWith('http') 
+                      ? previewUrls.before 
+                      : `${BACKEND}${previewUrls.before}`;
+                    setBeforeUrl(beforeFullUrl);
+                  }}
+                >
+                  Retry
+                </button>
+              </div>
             ) : loadingBefore ? (
-              <div className="preview-loading">Loading before preview...</div>
+              <div className="preview-loading">
+                <div className="loading-spinner"></div>
+                <p>Loading before preview...</p>
+              </div>
             ) : beforeUrl ? (
               <iframe
                 src={beforeUrl}
                 className="preview-iframe"
                 title="Before Preview"
-                onError={() => setBeforeError('Error loading before preview')}
+                onError={() => setBeforeError('Error loading before preview - the preview server might be unavailable')}
+                sandbox="allow-same-origin allow-scripts allow-forms"
               />
             ) : (
-              <div className="preview-error">Failed to load before preview</div>
+              <div className="preview-error">
+                <p>Failed to load before preview</p>
+                <button 
+                  className="retry-btn"
+                  onClick={() => {
+                    const beforeFullUrl = previewUrls.before.startsWith('http') 
+                      ? previewUrls.before 
+                      : `${BACKEND}${previewUrls.before}`;
+                    setBeforeUrl(beforeFullUrl);
+                  }}
+                >
+                  Retry
+                </button>
+              </div>
             )}
           </div>
 
           <div className="preview-pane">
             <h5>After</h5>
             {afterError ? (
-              <div className="preview-error">{afterError}</div>
+              <div className="preview-error">
+                <p>{afterError}</p>
+                <button 
+                  className="retry-btn"
+                  onClick={() => {
+                    setAfterError(null);
+                    const afterFullUrl = previewUrls.after.startsWith('http') 
+                      ? previewUrls.after 
+                      : `${BACKEND}${previewUrls.after}`;
+                    setAfterUrl(afterFullUrl);
+                  }}
+                >
+                  Retry
+                </button>
+              </div>
             ) : loadingAfter ? (
-              <div className="preview-loading">Loading after preview...</div>
+              <div className="preview-loading">
+                <div className="loading-spinner"></div>
+                <p>Loading after preview...</p>
+              </div>
             ) : afterUrl ? (
               <iframe
                 src={afterUrl}
                 className="preview-iframe"
                 title="After Preview"
-                onError={() => setAfterError('Error loading after preview')}
+                onError={() => setAfterError('Error loading after preview - the preview server might be unavailable')}
+                sandbox="allow-same-origin allow-scripts allow-forms"
               />
             ) : (
-              <div className="preview-error">Failed to load after preview</div>
+              <div className="preview-error">
+                <p>Failed to load after preview</p>
+                <button 
+                  className="retry-btn"
+                  onClick={() => {
+                    const afterFullUrl = previewUrls.after.startsWith('http') 
+                      ? previewUrls.after 
+                      : `${BACKEND}${previewUrls.after}`;
+                    setAfterUrl(afterFullUrl);
+                  }}
+                >
+                  Retry
+                </button>
+              </div>
             )}
           </div>
         </div>
@@ -372,7 +419,9 @@ export default function DiffModal({
           <h3>Preview Changes</h3>
           <button 
             className="close-btn" 
-            onClick={handleClose}
+            onClick={() => {
+              if (onClose) onClose();
+            }}
             disabled={isProcessing}
           >
             ×

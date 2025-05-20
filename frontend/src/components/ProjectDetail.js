@@ -3,6 +3,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import api from '../api';
 import { AuthContext } from '../AuthContext';
 import DiffModal from '../components/DiffModal';
+import { useDiff } from '../context/DiffContext';
 import FloatingChat from '../floating-bot/FloatingChat';
 
 import './css/ProjectDetail.css';
@@ -11,6 +12,7 @@ export default function ProjectDetail() {
   const { projectId } = useParams();
   const navigate = useNavigate();
   const { token } = useContext(AuthContext);
+  const { showDiffModal, diffData, clearDiffData, hideDiffModal, isModalOpen } = useDiff();
 
   const [project, setProject] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -19,11 +21,6 @@ export default function ProjectDetail() {
   const [showCreateAppModal, setShowCreateAppModal] = useState(false);
   const [newAppName, setNewAppName] = useState('');
   const [newAppDescription, setNewAppDescription] = useState('');
-
-  const [aiDiffFiles, setAiDiffFiles] = useState([]);
-  const [previewMap, setPreviewMap] = useState({});
-  const [modalOpen, setModalOpen] = useState(false);
-  const [changeId, setChangeId] = useState(null);
   const [running, setRunning] = useState(false);
 
   // Fetch project on mount
@@ -37,45 +34,92 @@ export default function ProjectDetail() {
   }, [projectId]);
 
   // Handle AI diff payload
-  const handleDiff = ({ files, previewMap, change_id }) => {
-    console.log('ProjectDetail received diff data:', { files, previewMap, change_id });
+  const handleDiff = (diffData) => {
+    console.log('ProjectDetail received diff data:', diffData);
     
-    if (!files || !files.length) {
-        console.error('No files to show in diff modal');
-        return;
+    if (!diffData?.files?.length) {
+      console.error('No files to show in diff modal');
+      return;
     }
 
-    // Ensure we have all required data
-    const formattedFiles = files.map(file => ({
-        ...file,
-        projectId: projectId,
-        changeId: change_id
-    }));
-
-    console.log('Setting diff modal with formatted files:', formattedFiles);
-    
-    // Update state in a single batch to avoid race conditions
-    setAiDiffFiles(formattedFiles);
-    setPreviewMap(previewMap || {});
-    setChangeId(change_id);
-    setModalOpen(true);
+    // Store the diff data in localStorage for persistence
+    try {
+      localStorage.setItem(`diff_data_${projectId}`, JSON.stringify(diffData));
+      // Show the diff modal using the context
+      showDiffModal(diffData);
+    } catch (err) {
+      console.error('Error storing diff data:', err);
+    }
   };
 
-  const applyChanges = () =>
-    api
-      .post(`/projects/${projectId}/apply/${changeId}/`)
-      .then(() => {
-        setModalOpen(false);
-        setAiDiffFiles([]);
-        alert('✅ Changes applied');
-      })
-      .catch(err => alert(`Error: ${err.message}`));
+  // Expose handleDiff so FloatingChat can access it even when closed
+  useEffect(() => {
+    window.handleDiffFromChat = handleDiff;
+    
+    // Check for diff data in localStorage on mount
+    try {
+      const storedData = localStorage.getItem(`diff_data_${projectId}`);
+      if (storedData) {
+        const parsedData = JSON.parse(storedData);
+        if (parsedData?.files?.length > 0) {
+          console.log('Found stored diff data, available for reuse');
+          // Don't auto-show the modal, just store the data in context
+          showDiffModal(parsedData, false);
+        }
+      }
+    } catch (err) {
+      console.error('Error restoring diff data:', err);
+    }
+    
+    return () => {
+      window.handleDiffFromChat = null;
+    };
+  }, [projectId, showDiffModal]);
 
-  const discardChanges = () =>
-    api
-      .post(`/ai/conversations/${changeId}/cancel/`)
-      .then(() => setModalOpen(false))
-      .catch(err => alert(`Error: ${err.message}`));
+  // Render DiffModal
+  const renderDiffModal = () => {
+    if (!isModalOpen || !diffData || !projectId) return null;
+
+    return (
+      <DiffModal
+        projectId={projectId}
+        changeId={diffData.change_id}
+        files={diffData.files}
+        isModalOpen={isModalOpen}
+        previewUrls={diffData?.previewMap || {}}
+        onClose={() => {
+          // Only close when X button is clicked
+          hideDiffModal();
+          // Don't remove data from localStorage or clear context when closing
+          // This allows the modal to persist even if chat is closed
+        }}
+        onApply={async () => {
+          try {
+            await api.post(`/projects/${projectId}/apply/${diffData.change_id}/`);
+            // Only clear data after successful apply
+            localStorage.removeItem(`diff_data_${projectId}`);
+            clearDiffData();
+            hideDiffModal();
+            alert('✅ Changes applied');
+          } catch (err) {
+            alert(`Error: ${err.message}`);
+          }
+        }}
+        onCancel={async () => {
+          try {
+            // Use the correct cancel endpoint
+            await api.post(`/projects/${projectId}/changes/${diffData.change_id}/cancel/`);
+            // Only clear data after successful cancel
+            localStorage.removeItem(`diff_data_${projectId}`);
+            clearDiffData();
+            hideDiffModal(true);
+          } catch (err) {
+            alert(`Error: ${err.message}`);
+          }
+        }}
+      />
+    );
+  };
 
   const handleCreateApp = () => {
     if (!newAppName.trim()) return alert('Enter an app name');
@@ -122,7 +166,7 @@ export default function ProjectDetail() {
   return (
     <main className="project-detail">
       <header className="project-detail__header">
-        <h1 className="project-detail__title">{project.name}</h1>
+        <h1 className="project-detail__title">{project?.name}</h1>
         <button
           className="btn btn--primary"
           onClick={handleRunProject}
@@ -132,18 +176,7 @@ export default function ProjectDetail() {
         </button>
       </header>
 
-      {modalOpen && aiDiffFiles.length > 0 && (
-        <DiffModal
-          projectId={projectId}
-          changeId={changeId}
-          files={aiDiffFiles}
-          previewMap={previewMap}
-          token={token}
-          onApply={applyChanges}
-          onCancel={discardChanges}
-          onClose={() => setModalOpen(false)}
-        />
-      )}
+      {renderDiffModal()}
 
       <FloatingChat onDiff={handleDiff} projectId={projectId} />
 
@@ -186,29 +219,16 @@ export default function ProjectDetail() {
                   {renderFileCards(app.template_files, 'template-files', null, app.id)}
                   {renderFileCards(app.app_files, 'app-files', null, app.id)}
                 </div>
-                <button
-                  className="btn btn--secondary app-card__manage-btn"
-                  onClick={() =>
-                    navigate(`/projects/${projectId}/apps/${app.id}/template-files`)
-                  }
-                >
-                  Manage Templates
-                </button>
               </div>
             ))
           ) : (
-            <p>No apps yet.</p>
-          )}
-
-          <div
-            className="app-card app-card--create"
-            onClick={() => setShowCreateAppModal(true)}
-          >
-            <div className="app-card--create-inner">
-              <span className="app-card--create-icon">＋</span>
-              <p>Create New App</p>
+            <div className="app-card app-card--create" onClick={() => setShowCreateAppModal(true)}>
+              <div className="app-card--create-inner">
+                <span className="app-card--create-icon">+</span>
+                <span>Create New App</span>
+              </div>
             </div>
-          </div>
+          )}
         </div>
       </section>
 

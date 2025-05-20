@@ -56,6 +56,11 @@ export default function FloatingChat({ projectId, appName, filePath }) {
   const handleDiff = useCallback((diffData) => {
     // Handle diff data if needed
     console.log('Diff data:', diffData);
+    
+    // If this component is a child of ProjectDetail, forward the diff data
+    if (window.parent && typeof window.parent.handleDiffFromChat === 'function') {
+      window.parent.handleDiffFromChat(diffData);
+    }
   }, []);
 
   return (
@@ -77,17 +82,16 @@ export default function FloatingChat({ projectId, appName, filePath }) {
             {isOpen ? '−' : '+'}
           </button>
         </div>
-        {isOpen && (
-          <div className="chat-content">
-            <AIChat
-              key={`chat-${projectId}-${appName || ''}-${filePath || ''}`}
-              projectId={projectId}
-              appName={appName}
-              filePath={filePath}
-              onDiff={handleDiff}
-            />
-          </div>
-        )}
+        {/* Always keep AIChat mounted but hide it when chat is closed */}
+        <div className={`chat-content ${isOpen ? 'visible' : 'hidden'}`}>
+          <AIChat
+            key={`chat-${projectId}-${appName || ''}-${filePath || ''}`}
+            projectId={projectId}
+            appName={appName}
+            filePath={filePath}
+            onDiff={handleDiff}
+          />
+        </div>
       </div>
     </Draggable>
   );

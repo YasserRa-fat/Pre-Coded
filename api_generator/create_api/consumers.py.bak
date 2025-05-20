@@ -13,7 +13,7 @@ from django.conf import settings
 from .views import setup_preview_project
 from asgiref.sync import sync_to_async
 from .preview_registry import preview_manager
-from .utils import chunk_api_request, process_chunked_response
+from .utils import chunk_api_request, process_chunked_response, sanitize_json_response
 import difflib
 import asyncio
 from django.db.models import Q
@@ -308,7 +308,7 @@ class AIWebSocketConsumer(BaseWebSocketConsumer):
     """WebSocket consumer for AI-related operations"""
     
     async def handle_ai_request(self, message):
-        """Handle AI service requests"""
+        """Handle AI request with proper response processing"""
         try:
             # Validate request
             if not self.validate_ai_request(message):
@@ -317,16 +317,45 @@ class AIWebSocketConsumer(BaseWebSocketConsumer):
                 
             # Process request
             response = await self.process_ai_request(message)
+            if not response:
+                await self.send_error("Failed to get AI response")
+                return
+                
+            # Process response with sanitization
+            processed = await self.process_ai_response(response)
+            if not processed:
+                return
+                
+            # Create change request
+            change_request = await self.create_change_request(
+                conversation_id=self.conversation.id,
+                project_id=self.project_id,
+                file_type='mixed',
+                diff=json.dumps(processed),
+                files=list(processed.get('files', {}).keys()),
+                app_name=getattr(self, 'app_name', None),
+                file_path=getattr(self, 'file_path', None)
+            )
             
-            # Send response
+            # Send diff modal
+            await self.send_diff_modal(
+                change_request.id,
+                processed,
+                list(processed.get('files', {}).keys())
+            )
+            
+            # Send success response
             await self.send(text_data=json.dumps({
-                'type': 'ai_response',
-                'data': response
+                'type': 'changes_generated',
+                'change_id': change_request.id,
+                'files': list(processed.get('files', {}).keys()),
+                'description': processed.get('description', 'Generated code changes'),
+                'timestamp': datetime.datetime.now().isoformat()
             }))
             
         except Exception as e:
-            logger.error(f"Error processing AI request: {str(e)}")
-            await self.send_error("Error processing AI request")
+            logger.error(f"Error handling AI request: {str(e)}")
+            await self.send_error("Error processing request")
             
     def validate_ai_request(self, message):
         """Validate AI request format"""
@@ -362,6 +391,471 @@ class AIWebSocketConsumer(BaseWebSocketConsumer):
             
             return response
 
+    async def process_ai_response(self, response):
+        """Process AI response with proper sanitization and file validation"""
+        try:
+            # Always set thread local context at the start and before any DB access
+            from core.thread_local import thread_local
+            thread_local.project_id = self.project_id
+            thread_local.db_alias = f"project_{self.project_id}"
+            
+            # Track original file paths for context preservation
+            original_file_paths = {}
+
+            from .utils import sanitize_json_response
+            sanitized = sanitize_json_response(response) if isinstance(response, str) else response
+            try:
+                data = json.loads(sanitized) if isinstance(sanitized, str) else sanitized
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse AI response as JSON: {str(e)}")
+                await self.send_error_safe("Invalid response format from AI")
+                return
+            
+            # Reset thread_local context again to ensure consistency
+            thread_local.project_id = self.project_id
+            thread_local.db_alias = f"project_{self.project_id}"
+            
+            # Get project structure data for dynamic path resolution
+            project_files = await self.get_project_files(self.project_id)
+            project_context = await self.get_project_context(self.project_id)
+            
+            if not project_files:
+                logger.error("No project files available")
+                await self.send_error_safe("No project files available")
+                return
+            
+            # Reset thread_local context again after async calls
+            thread_local.project_id = self.project_id
+            thread_local.db_alias = f"project_{self.project_id}"
+            
+            # Dynamically identify project structure
+            app_names = [app['name'] for app in project_context.get('apps', [])] if project_context else []
+            file_types = set(info['type'] for info in project_files.values())
+            logger.info(f"Dynamic project structure: {len(app_names)} apps, {len(file_types)} file types")
+            
+            if 'files' in data:
+                valid_files = {}
+                
+                # Store all existing file paths for reference
+                all_existing_files = set(project_files.keys())
+                
+                # Build file path reference for dynamic resolution
+                file_path_map = {}
+                for proj_path, info in project_files.items():
+                    # Add mappings by filename
+                    filename = os.path.basename(proj_path)
+                    if filename not in file_path_map:
+                        file_path_map[filename] = []
+                    file_path_map[filename].append((proj_path, info))
+                    
+                    # Add mappings by app+type
+                    if info['app']:
+                        app_type_key = f"{info['app']}/{info['type']}"
+                        if app_type_key not in file_path_map:
+                            file_path_map[app_type_key] = []
+                        file_path_map[app_type_key].append((proj_path, info))
+                
+                # For each file path in the response
+                for file_path, content in data['files'].items():
+                    # Reset thread_local context before processing each file to ensure consistency
+                    thread_local.project_id = self.project_id
+                    thread_local.db_alias = f"project_{self.project_id}"
+                    
+                    # Store original path for reference
+                    original_file_paths[file_path] = file_path
+                    
+                    # Normalize the path for consistent processing
+                    normalized_path = file_path.replace('\\', '/').lstrip('/')
+                    file_name = os.path.basename(normalized_path)
+                    file_exists = False
+                    final_path = None
+                    
+                    # Extract potential app and file type information
+                    path_parts = normalized_path.split('/')
+                    potential_app = None
+                    for app_name in app_names:
+                        if app_name.lower() in normalized_path.lower():
+                            potential_app = app_name
+                            break
+                    
+                    # Step 1: Try exact path match
+                    if normalized_path in project_files:
+                        file_exists = True
+                        final_path = normalized_path
+                        logger.info(f"Found exact path match: {normalized_path}")
+                    
+                    # Step 2: Try filename match with app context
+                    if not file_exists and file_name in file_path_map:
+                        candidates = file_path_map[file_name]
+                        
+                        # Reset thread_local context again before database operation
+                        thread_local.project_id = self.project_id
+                        thread_local.db_alias = f"project_{self.project_id}"
+                        
+                        # First try with app context if available
+                        if potential_app:
+                            for proj_path, info in candidates:
+                                if info['app'] and info['app'].lower() == potential_app.lower():
+                                    # Explicit existence check with DB to maintain context
+                                    exists = await self.file_exists(self.project_id, proj_path)
+                                    if exists:
+                                        file_exists = True
+                                        final_path = proj_path
+                                        logger.info(f"Found filename+app match: {normalized_path} → {final_path}")
+                                        break
+                        
+                        # If no match with app context, try any match
+                        if not file_exists:
+                            logger.debug(f"Looking for any match for {file_name} among {len(candidates)} candidates")
+                            # Try any candidate path
+                            for proj_path, info in candidates:
+                                # Reset thread_local context before database operation
+                                thread_local.project_id = self.project_id
+                                thread_local.db_alias = f"project_{self.project_id}"
+                                # Explicit existence check with DB to maintain context
+                                exists = await self.file_exists(self.project_id, proj_path)
+                                if exists:
+                                    file_exists = True
+                                    final_path = proj_path
+                                    logger.info(f"Found filename match: {normalized_path} → {final_path}")
+                                    break
+                    
+                    # Step 3: Try direct views.py resolution for common case
+                    if not file_exists and file_name == "views.py" and '/' in normalized_path:
+                        app_part = normalized_path.split('/')[0]
+                        # Check if there's a valid app with that name
+                        if app_part in app_names:
+                            candidate_path = f"{app_part}/views.py"
+                            # Reset thread_local context
+                            thread_local.project_id = self.project_id
+                            thread_local.db_alias = f"project_{self.project_id}"
+                            # Check if this path exists
+                            exists = await self.file_exists(self.project_id, candidate_path)
+                            if exists:
+                                file_exists = True
+                                final_path = candidate_path
+                                logger.info(f"Found view file match: {normalized_path} → {final_path}")
+                    
+                    # Step 4: If not found, find appropriate location based on file type
+                    if not file_exists:
+                        # Reset thread_local context
+                        thread_local.project_id = self.project_id
+                        thread_local.db_alias = f"project_{self.project_id}"
+                        
+                        # Query for an app to use
+                        if potential_app:
+                            app_exists = await self._is_valid_app(potential_app)
+                            if app_exists:
+                                # Determine file type
+                                file_type = self._get_file_type(file_name)
+                                
+                                # Look for similar files of same type in this app
+                                app_type_key = f"{potential_app}/{file_type}"
+                                if app_type_key in file_path_map:
+                                    # Use existing path pattern for similar files
+                                    template_path, _ = file_path_map[app_type_key][0]
+                                    dir_path = os.path.dirname(template_path)
+                                    final_path = f"{dir_path}/{file_name}" if dir_path else file_name
+                                    logger.info(f"Creating new file using app pattern: {final_path}")
+                                else:
+                                    # Create new path based on common patterns
+                                    if file_type == 'view':
+                                        final_path = f"{potential_app}/views.py"
+                                    elif file_type == 'template':
+                                        final_path = f"{potential_app}/templates/{file_name}"
+                                    elif file_type == 'static':
+                                        final_path = f"{potential_app}/static/{file_name}"
+                                    else:
+                                        final_path = f"{potential_app}/{file_name}"
+                                    logger.info(f"Creating new file with standard pattern: {final_path}")
+                            else:
+                                # Try to find a matching app that DOES exist
+                                existing_apps = []
+                                for app in app_names:
+                                    # Reset thread_local context
+                                    thread_local.project_id = self.project_id
+                                    thread_local.db_alias = f"project_{self.project_id}"
+                                    app_exists = await self._is_valid_app(app)
+                                    if app_exists:
+                                        existing_apps.append(app)
+                                
+                                if existing_apps:
+                                    file_type = self._get_file_type(file_name)
+                                    
+                                    # Use the first valid app as fallback
+                                    selected_app = existing_apps[0]
+                                    if file_type == 'view':
+                                        final_path = f"{selected_app}/views.py"
+                                    elif file_type == 'template':
+                                        final_path = f"{selected_app}/templates/{file_name}"
+                                    elif file_type == 'static':
+                                        final_path = f"{selected_app}/static/{file_name}"
+                                    else:
+                                        final_path = f"{selected_app}/{file_name}"
+                                    logger.info(f"Creating new file with existing app: {final_path}")
+                                else:
+                                    # No valid apps found, use global file type patterns
+                                    file_type = self._get_file_type(file_name)
+                                    if file_type == 'template':
+                                        final_path = f"templates/{file_name}"
+                                    elif file_type == 'static':
+                                        final_path = f"static/{file_name}"
+                                    else:
+                                        final_path = file_name
+                                    logger.info(f"Creating new file with type pattern: {final_path}")
+                        else:
+                            # No app context, try to infer from filename
+                            file_type = self._get_file_type(file_name)
+                            
+                            # Look for similar files to determine placement
+                            similar_file_types = [(path, info) for path, info in project_files.items() 
+                                                if info['type'] == file_type]
+                            
+                            if similar_file_types:
+                                # Use existing structure as template
+                                template_path, _ = similar_file_types[0]
+                                dir_path = os.path.dirname(template_path)
+                                final_path = f"{dir_path}/{file_name}" if dir_path else file_name
+                                logger.info(f"Creating new file using existing structure: {final_path}")
+                            else:
+                                # Use common conventions
+                                if file_type == 'template':
+                                    final_path = f"templates/{file_name}"
+                                elif file_type == 'static':
+                                    final_path = f"static/{file_name}"
+                                else:
+                                    final_path = file_name
+                                logger.info(f"Creating new file with conventional pattern: {final_path}")
+                    
+                    # Normalize the final path to avoid duplicates
+                    if final_path:
+                        final_path = final_path.replace('\\', '/').lstrip('/')
+                        valid_files[final_path] = content
+                        # Track relationship between original and final paths
+                        original_file_paths[file_path] = final_path
+                    else:
+                        logger.warning(f"Could not determine path for {normalized_path}, using original path")
+                        valid_files[normalized_path] = content
+                
+                data['files'] = valid_files
+            
+            # Create change request and display diff modal
+            if data.get('files'):
+                try:
+                    # Reset thread_local context before creating change request
+                    thread_local.project_id = self.project_id
+                    thread_local.db_alias = f"project_{self.project_id}"
+                    
+                    # Prepare file diffs for the change request
+                    file_diffs = {}
+                    for file_path, content in data['files'].items():
+                        try:
+                            existing_content = await self.get_file_content(file_path, self.project_id)
+                            file_diffs[file_path] = {
+                                'before': existing_content,
+                                'after': content,
+                            }
+                        except Exception as file_error:
+                            logger.error(f"Error getting content for {file_path}: {str(file_error)}")
+                    
+                    if file_diffs:
+                        # Create change request
+                        change_id = await self.create_change_request(
+                            conversation_id=self.conversation.id if hasattr(self, 'conversation') else None,
+                            project_id=self.project_id,
+                            file_type='multiple',
+                            diff='unified diff',
+                            files=file_diffs
+                        )
+                        
+                        # Prepare preview content
+                        preview_content = await self.prepare_preview_content(file_diffs)
+                        
+                        # Send diff modal to client
+                        await self.send_diff_modal(change_id, 'unified diff', file_diffs, preview_content)
+                
+                except Exception as e:
+                    logger.error(f"Error creating change request or showing diff modal: {str(e)}")
+                    logger.error(traceback.format_exc())
+            
+            return data
+        except Exception as e:
+            logger.error(f"Error processing AI response: {str(e)}")
+            logger.error(traceback.format_exc())
+            return None
+
+    async def _generate_possible_paths(self, normalized_path, app_name, file_type, project_files):
+        """Generate possible paths based on file type and app context"""
+        possible_paths = {normalized_path}
+        
+        if not app_name:
+            # Try to infer app name from existing files
+            for proj_path in project_files:
+                if normalized_path in proj_path:
+                    inferred_app = proj_path.split('/')[0]
+                    if await self._is_valid_app(inferred_app):
+                        app_name = inferred_app
+                        break
+
+        if app_name:
+            if file_type == 'view':
+                possible_paths.update([
+                    f"{app_name}/views.py",
+                    f"{app_name}/views/{normalized_path}",
+                    f"views/{app_name}.py",
+                    normalized_path
+                ])
+            elif file_type == 'template':
+                possible_paths.update([
+                    f"{app_name}/templates/{normalized_path}",
+                    f"templates/{app_name}/{normalized_path}",
+                    f"templates/{normalized_path}",
+                    normalized_path
+                ])
+            elif file_type == 'static':
+                possible_paths.update([
+                    f"{app_name}/static/{normalized_path}",
+                    f"static/{app_name}/{normalized_path}",
+                    f"static/{normalized_path}",
+                    normalized_path
+                ])
+        
+        return possible_paths
+
+    async def _check_path_match(self, proj_path, normalized_path, app_name, file_type):
+        """Check if project path matches the target path considering context"""
+        if not proj_path or not normalized_path:
+            return False
+            
+        proj_parts = proj_path.split('/')
+        norm_parts = normalized_path.split('/')
+        
+        # Check for view files specifically
+        if file_type == 'view' and 'views.py' in proj_path:
+            return (app_name is None or app_name.lower() in proj_path.lower())
+            
+        # Check if paths match considering app context
+        if app_name:
+            return (
+                proj_path.endswith(normalized_path) or
+                normalized_path.endswith(proj_path) or
+                (app_name.lower() in proj_path.lower() and norm_parts[-1] in proj_parts)
+            )
+        
+        return (
+            proj_path.endswith(normalized_path) or
+            normalized_path.endswith(proj_path) or
+            norm_parts[-1] in proj_parts
+        )
+
+    @database_sync_to_async
+    def _is_valid_app(self, app_name):
+        """Check if an app name is valid in the project, using the correct DB context."""
+        try:
+            from core.thread_local import thread_local
+            from create_api.models import App
+            
+            # Always set thread local context for project operations
+            thread_local.project_id = self.project_id
+            thread_local.db_alias = f"project_{self.project_id}"
+            
+            # But use default DB for App lookups
+            return App.objects.using('default').filter(project_id=self.project_id, name=app_name).exists()
+        except Exception as e:
+            logger.error(f"Error checking app validity: {str(e)}")
+            return False
+            
+    @database_sync_to_async
+    def file_exists(self, project_id, file_path):
+        """Check if a file exists in the project, using the correct DB context.
+        This method is used by process_ai_response to validate file paths."""
+        try:
+            from core.thread_local import thread_local
+            # Set thread local context for project operations
+            thread_local.project_id = project_id
+            thread_local.db_alias = f"project_{project_id}"
+            
+            # Always use default DB for file lookups since files are stored in default DB
+            db_alias = 'default'
+            
+            # Normalize the path for consistent lookup
+            normalized_path = file_path.replace('\\', '/').lstrip('/')
+            
+            logger.info(f"Checking if file exists: '{normalized_path}' in project {project_id}")
+            
+            # Determine model class based on file path
+            if normalized_path.endswith('.html') or '/templates/' in normalized_path:
+                from create_api.models import TemplateFile
+                model_class = TemplateFile
+            elif normalized_path.startswith('static/') or '/static/' in normalized_path:
+                from create_api.models import StaticFile
+                model_class = StaticFile
+            elif 'views.py' in normalized_path:
+                from create_api.models import ViewFile
+                model_class = ViewFile
+            elif 'models.py' in normalized_path:
+                from create_api.models import ModelFile
+                model_class = ModelFile
+            elif 'forms.py' in normalized_path:
+                from create_api.models import FormFile
+                model_class = FormFile
+            else:
+                from create_api.models import AppFile
+                model_class = AppFile
+            
+            # Check if file exists with exact path
+            exists = model_class.objects.using(db_alias).filter(
+                project_id=project_id,
+                path=normalized_path
+            ).exists()
+            
+            if exists:
+                logger.info(f"Found exact match for '{normalized_path}'")
+                return True
+                
+            # Special handling for views.py for app-specific views
+            if 'views.py' in normalized_path and '/' in normalized_path:
+                app_name = normalized_path.split('/')[0]
+                # Try with endswith to match different path patterns
+                from create_api.models import ViewFile
+                exists = ViewFile.objects.using(db_alias).filter(
+                    project_id=project_id, 
+                    path__endswith=f"{app_name}/views.py"
+                ).exists()
+                
+                if exists:
+                    logger.info(f"Found view file match for '{normalized_path}' using endswith")
+                    return True
+            
+            logger.debug(f"File '{normalized_path}' does not exist")
+            return False
+            
+        except Exception as e:
+            logger.error(f"Error checking file existence: {str(e)}")
+            logger.error(traceback.format_exc())
+            return False
+
+    async def _generate_new_file_path(self, normalized_path, app_name, file_type):
+        """Generate appropriate path for new files based on type and context"""
+        if not app_name:
+            # Default to a sensible location based on file type
+            if file_type == 'template':
+                return f"templates/{normalized_path}"
+            elif file_type == 'static':
+                return f"static/{normalized_path}"
+            elif file_type == 'view':
+                return normalized_path
+            
+        # App-specific paths
+        if file_type == 'view':
+            return f"{app_name}/views.py"
+        elif file_type == 'template':
+            return f"{app_name}/templates/{normalized_path}"
+        elif file_type == 'static':
+            return f"{app_name}/static/{normalized_path}"
+            
+        return f"{app_name}/{normalized_path}"
+
 class ProjectConsumer(AsyncWebsocketConsumer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -372,13 +866,13 @@ class ProjectConsumer(AsyncWebsocketConsumer):
         self.message_processor = None
         self.is_connected = False
         self.reconnect_attempts = 0
-        self.max_connection_retries = 3  # Add max retries constant
-        self.reconnect_delay = 2  # seconds
-        self.retry_delay = 1  # seconds - Add retry_delay for message queue
+        self.max_connection_retries = 3
+        self.reconnect_delay = 2
+        self.retry_delay = 1
         self.last_heartbeat = None
         self.heartbeat_interval = 30
         self.heartbeat_task = None
-        self.reconnect_task = None  # Add reconnect task attribute
+        self.reconnect_task = None
         self.heartbeat_timeout = 90
         self.is_closing = False
         self.processing_lock = asyncio.Lock()
@@ -570,16 +1064,14 @@ class ProjectConsumer(AsyncWebsocketConsumer):
             logger.error(traceback.format_exc())
 
     async def process_message_queue(self):
-        """Process messages in the queue with improved error handling and reconnection"""
+        """Process messages in the queue with improved error handling"""
         while not self.is_closing:
             try:
                 if not self.is_connected:
-                    # Wait for reconnection
                     await asyncio.sleep(self.retry_delay)
                     continue
                     
                 try:
-                    # Get message with timeout
                     message = await asyncio.wait_for(
                         self.message_queue.get(),
                         timeout=5.0
@@ -587,38 +1079,15 @@ class ProjectConsumer(AsyncWebsocketConsumer):
                 except asyncio.TimeoutError:
                     continue
                     
-                # Try to send the message with retries
-                max_retries = 3
-                retry_delay = 1  # seconds
-                
-                for attempt in range(max_retries):
-                    try:
-                        if not self.is_connected or self.is_closing:
-                            logger.warning(f"Connection lost during message processing (attempt {attempt + 1})")
-                            if attempt < max_retries - 1:
-                                await asyncio.sleep(retry_delay)
-                            continue
-                            
-                        await self.send(text_data=json.dumps(message))
-                        logger.debug(f"Successfully sent queued message of type: {message.get('type')}")
-                        self.message_queue.task_done()
-                        break  # Message sent successfully
-                        
-                    except (ConnectionClosedOK, ConnectionClosedError) as e:
-                        logger.warning(f"Connection closed while sending queued message (attempt {attempt + 1}): {str(e)}")
-                        self.is_connected = False
-                        if attempt < max_retries - 1:
-                            await asyncio.sleep(retry_delay)
-                            
-                    except Exception as e:
-                        logger.error(f"Error sending queued message (attempt {attempt + 1}): {str(e)}")
-                        if attempt < max_retries - 1:
-                            await asyncio.sleep(retry_delay)
-                
-                # If all retries failed, requeue the message unless shutting down
-                if not self.is_closing:
-                    await self.message_queue.put(message)
-                    await asyncio.sleep(self.retry_delay)
+                try:
+                    await self.send(text_data=json.dumps(message))
+                    logger.debug(f"Successfully sent queued message of type: {message.get('type')}")
+                    self.message_queue.task_done()
+                except Exception as e:
+                    logger.error(f"Error sending queued message: {str(e)}")
+                    if not self.is_closing:
+                        await self.message_queue.put(message)
+                        await asyncio.sleep(self.retry_delay)
                     
             except asyncio.CancelledError:
                 logger.info("Message queue processor cancelled")
@@ -943,10 +1412,6 @@ class ProjectConsumer(AsyncWebsocketConsumer):
                     normalized_path = file_path.replace('\\', '/').lstrip('/')
                     file_info = None
                     
-                    # Log detailed information for debugging
-                    logger.debug(f"Looking up file: '{file_path}', normalized to '{normalized_path}'")
-                    logger.debug(f"Available project files: {list(project_files.keys())}")
-                    
                     # Try different path variations
                     variations = [
                         normalized_path,
@@ -954,90 +1419,14 @@ class ProjectConsumer(AsyncWebsocketConsumer):
                         normalized_path[normalized_path.find('/')+1:] if '/' in normalized_path else None
                     ]
                     
-                    # Add additional path variations for more flexibility
-                    if '/' in normalized_path:
-                        app_name, rest = normalized_path.split('/', 1)
-                        variations.append(rest)  # Try without app prefix
-                        if rest == 'views.py':
-                            variations.append(f"{app_name}/views.py")  # Try explicit form for views.py
-                    
-                    logger.debug(f"Trying path variations: {variations}")
-                    
                     for path in variations:
                         if path and path in project_files:
                             file_info = project_files[path]
                             normalized_path = path
-                            logger.debug(f"Found match with variation: '{path}'")
                             break
                     
                     if not file_info:
-                        # Use FileIndexer's full power to find the file - it has more robust path handling
-                        from core.services.file_indexer import FileIndexer
-                        logger.debug(f"Initial lookup for '{file_path}' failed, trying FileIndexer directly")
-                        
-                        # Add extensive debugging to understand what files are available
-                        candidates = FileIndexer.get_candidates(self.project_id)
-                        logger.debug(f"All available file candidates: {candidates}")
-                        
-                        # Get exact normalized search path for verbose logging
-                        search_path = FileIndexer._normalize_path(file_path)
-                        logger.debug(f"Normalized search path: '{search_path}'")
-                        
-                        # Try to find the file using the more robust FileIndexer.find_file method
-                        file_instance = FileIndexer.find_file(self.project_id, file_path)
-                        
-                        if file_instance:
-                            file_content = file_instance.content
-                            
-                            # If we found the file, create the file_info structure
-                            logger.info(f"Found file '{file_path}' via FileIndexer direct lookup")
-                            model_class_name = file_instance.__class__.__name__
-                            
-                            # Determine file type
-                            file_type = None
-                            if model_class_name == 'ViewFile':
-                                file_type = 'views'
-                            elif model_class_name == 'ModelFile':
-                                file_type = 'models'
-                            elif model_class_name == 'FormFile':
-                                file_type = 'forms'
-                            elif model_class_name == 'TemplateFile':
-                                file_type = 'templates'
-                            elif model_class_name == 'StaticFile':
-                                file_type = 'static'
-                            else:
-                                file_type = 'generic_code'
-                            
-                            # Create app structure 
-                            app_name = None
-                            app_id = None
-                            if hasattr(file_instance, 'app_id') and file_instance.app_id:
-                                from create_api.models import App
-                                try:
-                                    app_obj = App.objects.using('default').get(id=file_instance.app_id)
-                                    app_name = app_obj.name
-                                    app_id = app_obj.id
-                                except Exception as e:
-                                    logger.error(f"Error getting app info: {e}")
-                            
-                            # Create file info structure
-                            file_info = {
-                                'content': file_content,
-                                'type': file_type,
-                                'name': file_path.split('/')[-1],
-                                'app': app_name,
-                                'app_id': app_id
-                            }
-                            
-                            # Set the normalized_path to the actual file path
-                            normalized_path = file_path
-                        else:
-                            logger.warning(f"File '{file_path}' not found even with direct FileIndexer lookup")
-                            continue
-                    
-                    # Make sure we have a valid file_info before proceeding
-                    if not file_info:
-                        logger.error(f"Failed to find file '{file_path}' using all lookup methods")
+                        logger.warning(f"Selected file {file_path} not found in project")
                         continue
 
                     content = file_info['content']
@@ -1312,8 +1701,13 @@ class ProjectConsumer(AsyncWebsocketConsumer):
     def get_project_files(self, project_id):
         """Get all files for project with proper content handling using FileIndexer, using canonical DB paths."""
         try:
+            from core.thread_local import thread_local
+            # Set thread local context for project operations
             thread_local.project_id = project_id
             thread_local.db_alias = f"project_{project_id}"
+            
+            # But use default DB for file operations
+            db_alias = 'default'
             
             FileIndexer.load_index(project_id) # Ensure index is loaded for the project
             
@@ -1350,7 +1744,7 @@ class ProjectConsumer(AsyncWebsocketConsumer):
                     if hasattr(file_instance, 'app_id') and file_instance.app_id:
                         from create_api.models import App
                         try:
-                            # Explicitly use default database for App lookup
+                            # Use default DB for App lookup, but keep thread context set
                             app_obj = App.objects.using('default').get(id=file_instance.app_id)
                             app_name_str = app_obj.name
                             app_id_int = app_obj.id
@@ -1358,7 +1752,6 @@ class ProjectConsumer(AsyncWebsocketConsumer):
                             logging.error(f"Error fetching App with ID {file_instance.app_id}: {str(e)}")
                             app_name_str = None
                             app_id_int = None
-                    # Don't use file_instance.app directly as it may try to use the wrong database
                 else:
                     # Fallback if instance not found - this should ideally not happen if path is from candidates
                     logger.warning(f"[ProjectConsumer] File instance not found for candidate path: {canonical_path}. Attempting to infer type from path.")
@@ -1394,15 +1787,23 @@ class ProjectConsumer(AsyncWebsocketConsumer):
     def get_project_context(self, project_id):
         """Get project context for validation"""
         try:
-            project = Project.objects.using('default').get(id=project_id)
+            from core.thread_local import thread_local
+            # Set thread local context for project operations
+            thread_local.project_id = project_id
+            thread_local.db_alias = f"project_{project_id}"
+            
+            # But use default DB for file/app/project operations
+            db_alias = 'default'
+            
+            project = Project.objects.using(db_alias).get(id=project_id)
             return {
                 'project_id': project.id,
                 'project_name': project.name,
-                'apps': list(App.objects.using('default').filter(project=project).values('id', 'name')),
-                'models': list(ModelFile.objects.using('default').filter(project=project).values('id', 'name', 'path')),
-                'views': list(ViewFile.objects.using('default').filter(project=project).values('id', 'name', 'path')),
-                'forms': list(FormFile.objects.using('default').filter(project=project).values('id', 'name', 'path')),
-                'templates': list(TemplateFile.objects.using('default').filter(project=project).values('id', 'name', 'path')),
+                'apps': list(App.objects.using(db_alias).filter(project=project).values('id', 'name')),
+                'models': list(ModelFile.objects.using(db_alias).filter(project=project).values('id', 'name', 'path')),
+                'views': list(ViewFile.objects.using(db_alias).filter(project=project).values('id', 'name', 'path')),
+                'forms': list(FormFile.objects.using(db_alias).filter(project=project).values('id', 'name', 'path')),
+                'templates': list(TemplateFile.objects.using(db_alias).filter(project=project).values('id', 'name', 'path')),
             }
         except Project.DoesNotExist:
             logger.error(f"Project {project_id} not found")
@@ -1499,7 +1900,7 @@ class ProjectConsumer(AsyncWebsocketConsumer):
             return TemporaryChangeRequest()
 
     async def send_diff_modal(self, change_id, diff, files, preview_content=None):
-        """Send diff modal with improved error handling and message queueing"""
+        """Send diff modal with improved error handling"""
         try:
             # Parse the JSON data if needed
             diff_data = json.loads(diff) if isinstance(diff, str) else diff
@@ -1532,38 +1933,17 @@ class ProjectConsumer(AsyncWebsocketConsumer):
                 'timestamp': datetime.datetime.now().isoformat()
             }
 
-            # Try to send message with retries
-            max_retries = 3
-            retry_delay = 1  # seconds
-            
-            for attempt in range(max_retries):
-                try:
-                    if self.is_connected and not self.is_closing:
-                        await self.send(text_data=json.dumps(message_data))
-                        logger.info("Diff modal sent successfully")
-                        return
-                    else:
-                        logger.warning(f"Connection not ready (attempt {attempt + 1}/{max_retries})")
-                        if attempt < max_retries - 1:
-                            await asyncio.sleep(retry_delay)
-                except (ConnectionClosedOK, ConnectionClosedError) as e:
-                    logger.warning(f"Connection closed while sending diff modal (attempt {attempt + 1}): {str(e)}")
-                    self.is_connected = False
-                    if attempt < max_retries - 1:
-                        await asyncio.sleep(retry_delay)
-                except Exception as e:
-                    logger.error(f"Error sending diff modal (attempt {attempt + 1}): {str(e)}")
-                    if attempt < max_retries - 1:
-                        await asyncio.sleep(retry_delay)
-
-            # If all retries failed, queue the message
-            logger.info("All send attempts failed, queueing diff modal message")
-            await self.message_queue.put(message_data)
+            # Send or queue the message
+            if self.is_connected and not self.is_closing:
+                await self.send(text_data=json.dumps(message_data))
+                logger.info("Diff modal sent successfully")
+            else:
+                logger.warning("Connection not ready, queueing diff modal")
+                await self.message_queue.put(message_data)
 
         except Exception as e:
-            logger.error(f"Error preparing diff modal: {str(e)}")
+            logger.error(f"Error sending diff modal: {str(e)}")
             logger.error(traceback.format_exc())
-            # Queue the message even if there was an error preparing it
             if not self.is_closing:
                 await self.message_queue.put(message_data)
 
@@ -1782,53 +2162,28 @@ class ProjectConsumer(AsyncWebsocketConsumer):
             return None
 
     async def send_error_safe(self, message, code=None):
-        """Send error message with improved connection handling and retries"""
+        """Send error message with improved connection handling"""
         try:
             error_data = {
                 'type': 'error',
-                'message': str(message),
-                'timestamp': datetime.datetime.now().isoformat()
+                'message': str(message)
             }
             if code:
                 error_data['code'] = code
 
-            # Try to send with retries
-            max_retries = 3
-            retry_delay = 1  # seconds
-            
-            for attempt in range(max_retries):
+            if self.is_connected and not self.is_closing:
                 try:
-                    if self.is_connected and not self.is_closing:
-                        await self.send(text_data=json.dumps(error_data))
-                        logger.debug("Error message sent successfully")
-                        return
-                    else:
-                        logger.warning(f"Connection not ready for error message (attempt {attempt + 1}/{max_retries})")
-                        if attempt < max_retries - 1:
-                            await asyncio.sleep(retry_delay)
-                except (ConnectionClosedOK, ConnectionClosedError) as e:
-                    logger.warning(f"Connection closed while sending error (attempt {attempt + 1}): {str(e)}")
-                    self.is_connected = False
-                    if attempt < max_retries - 1:
-                        await asyncio.sleep(retry_delay)
+                    await self.send(text_data=json.dumps(error_data))
                 except Exception as e:
-                    logger.error(f"Error sending error message (attempt {attempt + 1}): {str(e)}")
-                    if attempt < max_retries - 1:
-                        await asyncio.sleep(retry_delay)
-            
-            # If all retries failed, queue the message
-            logger.warning("Connection unavailable, queueing error message")
-            await self.message_queue.put(error_data)
+                    logger.error(f"Error sending error message: {str(e)}")
+                    await self.message_queue.put(error_data)
+            else:
+                logger.warning("Connection closed, queueing error message")
+                await self.message_queue.put(error_data)
 
         except Exception as e:
-            logger.error(f"Critical error in send_error_safe: {str(e)}")
-            logger.error(traceback.format_exc())
-            # Try to queue even in case of critical error
-            try:
-                if not self.is_closing:
-                    await self.message_queue.put(error_data)
-            except Exception as queue_error:
-                logger.error(f"Failed to queue error message: {str(queue_error)}")
+            logger.error(f"Error in send_error_safe: {str(e)}")
+            # At this point, we can't do much more than log the error
 
     async def update_template_file(self, path, content):
         """Update or create a template file with AI-generated content"""
@@ -1870,7 +2225,15 @@ class ProjectConsumer(AsyncWebsocketConsumer):
     def apply_file_change(self, project_id, file_path, content, file_type=None):
         """Apply file change to the database"""
         try:
-            project = Project.objects.using('default').get(id=project_id)
+            from core.thread_local import thread_local
+            # Set thread local context for project operations
+            thread_local.project_id = project_id
+            thread_local.db_alias = f"project_{project_id}"
+            
+            # But use default DB for file operations
+            db_alias = 'default'
+            
+            project = Project.objects.using(db_alias).get(id=project_id)
             
             # Determine the file type based on the path
             model_class = None
@@ -1888,20 +2251,20 @@ class ProjectConsumer(AsyncWebsocketConsumer):
                 model_class = AppFile
 
             # Try to find the file
-            file_obj = model_class.objects.using('default').filter(project=project, path=file_path).first()
+            file_obj = model_class.objects.using(db_alias).filter(project=project, path=file_path).first()
             
             if file_obj:
                 # Update existing file
                 file_obj.content = content
                 if hasattr(file_obj, 'file_type') and file_type:
                     file_obj.file_type = file_type
-                file_obj.save(using='default')
+                file_obj.save(using=db_alias)
                 logger.info(f"Updated file: {file_path}")
             else:
                 # Create new file
                 # Determine if this file belongs to an app
                 app = None
-                for app_obj in App.objects.using('default').filter(project=project):
+                for app_obj in App.objects.using(db_alias).filter(project=project):
                     if app_obj.name.lower() in file_path.lower():
                         app = app_obj
                         break
@@ -1924,7 +2287,7 @@ class ProjectConsumer(AsyncWebsocketConsumer):
                     # Create ContentFile for the file field
                     create_kwargs['file'] = ContentFile(content.encode(), name=os.path.basename(file_path))
 
-                file_obj = model_class.objects.using('default').create(**create_kwargs)
+                file_obj = model_class.objects.using(db_alias).create(**create_kwargs)
                 logger.info(f"Created new file: {file_path}")
 
             return True
@@ -1950,583 +2313,158 @@ class ProjectConsumer(AsyncWebsocketConsumer):
             logger.error(f"Error updating conversation status: {str(e)}")
             logger.error(traceback.format_exc())
 
-    async def process_ai_response(self, response):
-        """Process AI response and send changes to client"""
+    @database_sync_to_async
+    def _is_valid_app(self, app_name):
+        """Check if an app name is valid in the project, using the correct DB context."""
         try:
-                        # Extract response data
-            logger.debug(f"Processing AI response: {str(response)[:200]}...")
+            from core.thread_local import thread_local
+            from create_api.models import App
             
-            # Parse JSON if needed
-            try:
-                json_data = response if isinstance(response, dict) else json.loads(response)
-            except json.JSONDecodeError:
-                logger.error("Failed to parse AI response as JSON")
-                logger.error(f"Response: {response}")
-                await self.send_error_safe("Invalid response from AI")
-                return
-
-            if not isinstance(json_data, dict) or 'files' not in json_data:
-                logger.error("AI response does not contain 'files' key")
-                logger.error(f"Response: {response}")
-                await self.send_error_safe("Invalid response structure from AI")
-                return
-
-            files = json_data.get('files', {})
-            if not files:
-                logger.error("No files found in AI response")
-                await self.send_error_safe("No file changes generated")
-                return
-
-            # Analyze the request to determine feature context - no hardcoding specific features
-            feature_context = self._analyze_request_context(self.last_message) if hasattr(self, 'last_message') else {}
-            logger.debug(f"Request feature context: {feature_context}")
-
-            # Prepare diff data
-            diff_data = {
-                'files': {},
-                'project_id': self.project_id
-            }
+            # Always set thread local context for project operations
+            thread_local.project_id = self.project_id
+            thread_local.db_alias = f"project_{self.project_id}"
             
-            processed_files = []
-            file_metadata = {}
-            
-            # Check for original file versions for diffing
-            original_files = json_data.get('original_files', {})
-            if original_files:
-                logger.debug(f"Found {len(original_files)} original files for diffing")
-            
-            # Categorize files to check if we have templates and views for analytics
-            template_files = []
-            view_files = []
-            static_files = []
-            
-            for file_path, content in files.items():
-                # Categorize files
-                if file_path.endswith('.html'):
-                    template_files.append(file_path)
-                elif 'views.py' in file_path or file_path.endswith('.py'):
-                    view_files.append(file_path)
-                elif file_path.startswith('static/'):
-                    static_files.append(file_path)
-                    
-            # Analyze template-view relationship to identify missing dependencies
-            if template_files and not view_files:
-                logger.info("Template files present but missing related view files - determining needed views")
-                
-                # Analyze the request to determine what views are needed based on the templates
-                feature_context = self._analyze_request_context(self.last_message) if hasattr(self, 'last_message') else {}
-                template_features = []
-                
-                # Extract features from template files
-                for template_path in template_files:
-                    template_content = files.get(template_path, "")
-                    if isinstance(template_content, str):
-                        template_context = self._analyze_request_context(template_content)
-                        if template_context and 'features' in template_context:
-                            template_features.extend(template_context['features'])
-                
-                logger.debug(f"Detected template features: {template_features}")
-                
-                # Generate a dynamic context-aware analyzer prompt
-                context_analyzer_prompt = f"""
-You are a Django project structure analyzer. I need your help analyzing a feature request and determining what files are needed.
-
-PROJECT CONTEXT:
-- User request: "{self.last_message if hasattr(self, 'last_message') else ''}"
-- Files already generated: {template_files + static_files}
-- Detected features: {template_features}
-- Request keywords: {feature_context.get('keywords', [])}
-
-TASK:
-Your task is to determine:
-1. Does this request require server-side view logic?
-2. What is the appropriate Django app (directory) for these changes?
-3. What specific functionality is needed in the view?
-
-Return a JSON object with your analysis, specifying exactly what files are needed and why.
-"""
-                # Get project context first to use throughout the analysis
-                project_context = await self.get_project_context(self.project_id)
-                
-                # Get AI analysis of the needed view structure
-                context_analysis = ""
-                try:
-                    context_analysis = await make_ai_api_call(
-                        prompt=context_analyzer_prompt,
-                        max_tokens=1000,
-                        temperature=0.2
-                    )
-                except Exception as e:
-                    logger.error(f"Error in context analysis: {str(e)}")
-                    
-                # Parse the analysis (even if plain text) to determine needs
-                needs_view = False
-                view_app = None
-                view_functionality = []
-                
-                # Basic text analysis if not JSON
-                if context_analysis:
-                    logger.debug(f"Request context analysis received: {context_analysis[:200]}...")
-                    
-                    if "need" in context_analysis.lower() and "view" in context_analysis.lower():
-                        needs_view = True
-                    
-                    # Extract app name dynamically from project context
-                    view_app = None
-                    
-                    # Get a list of app names dynamically from project context
-                    app_names = []
-                    if project_context and 'apps' in project_context:
-                        app_names = [app['name'] for app in project_context['apps']]
-                        logger.debug(f"Available apps from project context: {app_names}")
-                        
-                    # Check for any app names mentioned in the analysis
-                    if app_names:
-                        for app_name in app_names:
-                            if app_name.lower() in context_analysis.lower():
-                                view_app = app_name
-                                logger.debug(f"Found app name in context analysis: {app_name}")
-                                break
-                    
-                    # Default to first template's app if found
-                    if not view_app and template_files:
-                        parts = template_files[0].split('/')
-                        if len(parts) > 1:
-                            view_app = parts[0]
-                    
-                    # Choose a default app based on project context if no app is determined
-                    if not view_app and app_names:
-                        # Get app with views first as preferred default
-                        for app_name in app_names:
-                            # Use sync_to_async to handle DB query in async context
-                            from asgiref.sync import sync_to_async
-                            view_files_exist = await sync_to_async(lambda: ViewFile.objects.using('default').filter(
-                                project_id=self.project_id,
-                                path__contains=f"{app_name}/views"
-                            ).exists())()
-                            
-                            # Log detailed debug info
-                            logger.debug(f"Checking for views in app {app_name} for project {self.project_id}, exists: {view_files_exist}")
-                            
-                            if view_files_exist:
-                                view_app = app_name
-                                logger.info(f"Defaulting to app with existing views: {app_name}")
-                                break
-                    
-                    # If still no view app, use first app
-                    if not view_app and app_names:
-                        view_app = app_names[0]
-                        logger.info(f"Defaulting to first available app: {view_app}")
-                    
-                    # Extract needed functionality
-                    functionality_keywords = ['data', 'fetch', 'context', 'render', 'api', 'database']
-                    for keyword in functionality_keywords:
-                        if keyword in context_analysis.lower():
-                            view_functionality.append(keyword)
-                
-                # Always check for required views regardless of previous needs_view flag
-                if template_files:
-                    # Set needs_view to true if we have template files that likely need views
-                    needs_view = True
-                    logger.info(f"Templates require view updates: {template_files}")
-                
-                if needs_view:
-                    logger.info(f"AI analysis indicates view needed for app: {view_app} with functionality: {view_functionality}")
-                    
-                    # Get the right view path based on the determined app
-                    view_path = ""
-                    if view_app:
-                        view_path = f"{view_app}/views.py"
-                        logger.debug(f"Using view path: {view_path}")
-                    else:
-                        # Try to find any existing views.py file
-                        from asgiref.sync import sync_to_async
-                        
-                        # Add detailed debugging
-                        logger.debug("No view app determined, searching for any views.py file")
-                        
-                        # Get all view files for debugging
-                        all_view_files = await sync_to_async(lambda: list(ViewFile.objects.using('default').filter(
-                            project_id=self.project_id
-                        ).values_list('path', flat=True)))()
-                        
-                        logger.debug(f"All view files in project {self.project_id}: {all_view_files}")
-                        
-                        # Now search for views.py file
-                        view_file = await sync_to_async(lambda: ViewFile.objects.using('default').filter(
-                            project_id=self.project_id,
-                            path__contains="views.py"
-                        ).first())()
-                        
-                        if view_file:
-                            view_path = view_file.path
-                            logger.debug(f"Found view file: {view_path}")
-                        else:
-                            # Check specifically for posts/views.py if no other view file found
-                            posts_view = await sync_to_async(lambda: ViewFile.objects.using('default').filter(
-                                project_id=self.project_id,
-                                path__contains="posts/views.py"
-                            ).first())()
-                            
-                            if posts_view:
-                                view_path = posts_view.path
-                                logger.debug(f"Found posts/views.py file: {view_path}")
-                            else:
-                                # Default to a generic views.py if nothing else found
-                                view_path = "views.py"
-                                logger.debug("No view file found, using default views.py")
-                    
-                    # Generate a dynamic prompt for the view file with explicit instructions
-                    view_update_prompt = f"""
-Based on the request: "{self.last_message if hasattr(self, 'last_message') else ''}"
-
-Create Django view functionality to support template changes for analytics graphs.
-
-The template shows: {', '.join(template_files)}
-
-IMPORTANT REQUIREMENTS:
-1. Return ONLY clean code with no markdown formatting
-2. The view should be in the '{view_app if view_app else "appropriate"}' app directory 
-3. Include necessary imports for data processing (django.utils.timezone, django.db.models, etc.)
-4. Process relevant model data for the logged-in user
-5. Format data for chart display in the template
-
-Return a valid JSON object with the complete view file:
-{{
-    "files": {{
-        "{view_path}": "complete view file content with no markdown formatting"
-    }}
-}}
-"""
-                
-                # Make AI call for view file update
-                view_update_response = None
-                try:
-                    # Only make the call if we have a prompt
-                    if view_update_prompt:
-                        view_update_response = await make_ai_api_call(
-                            prompt=view_update_prompt,
-                            max_tokens=8192,
-                            temperature=0.2
-                        )
-                except Exception as e:
-                    logger.error(f"Error getting dynamic view updates: {str(e)}")
-                    
-                    if view_update_response:
-                        # Parse the response
-                        try:
-                            from core.services.json_validator import sanitize_ai_response
-                            sanitized_response = await sanitize_ai_response(view_update_response, detect_analytics=False, request_text=self.last_message)
-                            try:
-                                view_changes = json.loads(sanitized_response)
-                                if isinstance(view_changes, dict) and 'files' in view_changes:
-                                    # Add the view file to our collection
-                                    for view_path, view_content in view_changes['files'].items():
-                                        # Detect the feature dynamically from the file content
-                                        feature_context = self._analyze_request_context(view_content)
-                                        features = feature_context.get('features', [])
-                                        feature_types = ', '.join(features) if features else "required feature"
-                                        logger.info(f"Adding view file {view_path} for {feature_types}")
-                                        files[view_path] = view_content
-                                        
-                                        # If the response includes original content, add it to original_files
-                                        if 'original_files' in view_changes and view_path in view_changes['original_files']:
-                                            logger.debug(f"Adding original file content for {view_path}")
-                                            original_files[view_path] = view_changes['original_files'][view_path]
-                            except Exception as e:
-                                logger.error(f"Error parsing view update response: {str(e)}")
-                        except ImportError:
-                            # Fall back to direct JSON parsing if sanitize_ai_response not available
-                            try:
-                                view_changes = json.loads(view_update_response)
-                                if isinstance(view_changes, dict) and 'files' in view_changes:
-                                    for view_path, view_content in view_changes['files'].items():
-                                        # Detect the feature dynamically from the file content
-                                        feature_context = self._analyze_request_context(view_content)
-                                        features = feature_context.get('features', [])
-                                        feature_types = ', '.join(features) if features else "required feature"
-                                        logger.info(f"Adding view file {view_path} for {feature_types}")
-                                        files[view_path] = view_content
-                            except Exception as e:
-                                logger.error(f"Error parsing view update response (direct): {str(e)}")
-                except Exception as e:
-                    logger.error(f"Error getting dynamic view updates: {str(e)}")
-
-            # Continue normal processing with potentially added view files
-            for file_path, content in files.items():
-                try:
-                    # Normalize path for DB
-                    logger.debug(f"Processing file: {file_path}")
-                    original_path = file_path
-                    is_template = file_path.endswith('.html')
-                    is_view = 'views.py' in file_path or file_path.endswith('.py')
-                    is_static = file_path.startswith('static/')
-                    is_js = file_path.endswith('.js')
-                    is_css = file_path.endswith('.css')
-                    
-                    # Get normalized path
-                    if is_template:
-                        # For templates, we store them without the templates/ prefix in the DB
-                        normalized_path = file_path.replace('templates/', '')
-                        logger.debug(f"Normalized template path: {normalized_path}")
-                    else:
-                        normalized_path = file_path
-                    
-                    # Get the original content and file type
-                    file_exists = False
-                    original_content = ""
-                    
-                    # Check if we have original file content first
-                    if normalized_path in original_files:
-                        logger.debug(f"Using original file content from response for {normalized_path}")
-                        original_content = original_files[normalized_path]
-                        file_exists = True
-                    else:
-                        try:
-                            # Get original content from FileIndexer
-                            original_content = await self.get_file_content(normalized_path, self.project_id)
-                            if original_content is not None:
-                                file_exists = True
-                        except Exception as e:
-                            logger.warning(f"File {normalized_path} not found: {str(e)}")
-                            if is_static:
-                                # We'll create this static file
-                                logger.info(f"Will create new static file: {normalized_path}")
-                            else:
-                                logger.warning(f"Non-static file not found: {normalized_path}")
-                    
-                    # Determine file type
-                    if is_template:
-                        file_type = 'html'
-                    elif is_js:
-                        file_type = 'js'
-                    elif is_css:
-                        file_type = 'css'
-                    elif is_view:
-                        file_type = 'python'
-                    else:
-                        file_type = 'text'
-                    
-                    # Store metadata for dependency analysis
-                    file_metadata[normalized_path] = {
-                        'is_template': is_template,
-                        'is_view': is_view,
-                        'is_static': is_static,
-                        'is_js': is_js,
-                        'is_css': is_css,
-                        'app_name': normalized_path.split('/')[0] if '/' in normalized_path else None,
-                    }
-
-                    # Add to diff data
-                    diff_data['files'][normalized_path] = {
-                        'before': original_content,
-                        'after': content,
-                        'file_type': file_type,
-                        'is_new': not file_exists,
-                        'requires_view_update': is_template,
-                        'requires_static': is_static,
-                        'requires_template': is_template,
-                        'file_metadata': file_metadata[normalized_path]
-                    }
-                    processed_files.append(normalized_path)
-                    logger.info(f"Added file to changes: {normalized_path}")
-                except Exception as e:
-                    logger.error(f"Error processing file {file_path}: {str(e)}")
-                    logger.error(traceback.format_exc())
-                    continue
-
-            # Log the complete diff data for debugging
-            logger.debug(f"Final diff data contains {len(diff_data['files'])} files")
-            for path in diff_data['files'].keys():
-                logger.debug(f"Including in diff: {path}")
-
-            # Create change request with the complete diff data
-            change_request = await self.create_change_request(
-                conversation_id=self.conversation.id,
-                project_id=self.project_id,
-                file_type='mixed',  # Since we can have multiple file types
-                diff=json.dumps(diff_data),
-                files=processed_files,
-                app_name=getattr(self, 'app_name', None),
-                file_path=getattr(self, 'file_path', None)
-            )
-            logger.info(f"Created change request ID: {change_request.id}")
-
-            # Prepare preview content
-            preview_content = await self.prepare_preview_content(files)
-
-            # Send diff modal data
-            await self.send_diff_modal(change_request.id, diff_data, processed_files, preview_content)
-            logger.info(f"Sent diff modal for change request {change_request.id}")
-
-            # Send response with change request ID
-            await self.send(text_data=json.dumps({
-                'type': 'changes_generated',
-                'change_id': change_request.id,
-                'files': processed_files,
-                'description': response.get('description', 'Generated code changes'),
-                'timestamp': datetime.datetime.now().isoformat()
-            }))
-
+            # But use default DB for App lookups
+            return App.objects.using('default').filter(project_id=self.project_id, name=app_name).exists()
         except Exception as e:
-            logger.error(f"Error processing AI response: {str(e)}")
+            logger.error(f"Error checking app validity: {str(e)}")
+            return False
+            
+    @database_sync_to_async
+    def file_exists(self, project_id, file_path):
+        """Check if a file exists in the project, using the correct DB context.
+        This method is used by process_ai_response to validate file paths."""
+        try:
+            from core.thread_local import thread_local
+            # Set thread local context for project operations
+            thread_local.project_id = project_id
+            thread_local.db_alias = f"project_{project_id}"
+            
+            # Always use default DB for file lookups since files are stored in default DB
+            db_alias = 'default'
+            
+            # Normalize the path for consistent lookup
+            normalized_path = file_path.replace('\\', '/').lstrip('/')
+            
+            logger.info(f"Checking if file exists: '{normalized_path}' in project {project_id}")
+            
+            # Determine model class based on file path
+            if normalized_path.endswith('.html') or '/templates/' in normalized_path:
+                from create_api.models import TemplateFile
+                model_class = TemplateFile
+            elif normalized_path.startswith('static/') or '/static/' in normalized_path:
+                from create_api.models import StaticFile
+                model_class = StaticFile
+            elif 'views.py' in normalized_path:
+                from create_api.models import ViewFile
+                model_class = ViewFile
+            elif 'models.py' in normalized_path:
+                from create_api.models import ModelFile
+                model_class = ModelFile
+            elif 'forms.py' in normalized_path:
+                from create_api.models import FormFile
+                model_class = FormFile
+            else:
+                from create_api.models import AppFile
+                model_class = AppFile
+            
+            # Check if file exists with exact path
+            exists = model_class.objects.using(db_alias).filter(
+                project_id=project_id,
+                path=normalized_path
+            ).exists()
+            
+            if exists:
+                logger.info(f"Found exact match for '{normalized_path}'")
+                return True
+                
+            # Special handling for views.py for app-specific views
+            if 'views.py' in normalized_path and '/' in normalized_path:
+                app_name = normalized_path.split('/')[0]
+                # Try with endswith to match different path patterns
+                from create_api.models import ViewFile
+                exists = ViewFile.objects.using(db_alias).filter(
+                    project_id=project_id, 
+                    path__endswith=f"{app_name}/views.py"
+                ).exists()
+                
+                if exists:
+                    logger.info(f"Found view file match for '{normalized_path}' using endswith")
+                    return True
+            
+            logger.debug(f"File '{normalized_path}' does not exist")
+            return False
+            
+        except Exception as e:
+            logger.error(f"Error checking file existence: {str(e)}")
             logger.error(traceback.format_exc())
-            await self.send_error_safe(f"Error processing AI response: {str(e)}")
+            return False
 
     @database_sync_to_async
     def get_file_content(self, file_path, project_id):
         """Get the content of an existing file"""
         try:
-            logger.info(f"Getting content for file {file_path} in project {project_id}")
+            from core.thread_local import thread_local
+            # Set thread local context for project operations
+            thread_local.project_id = project_id
+            thread_local.db_alias = f"project_{project_id}"
+            
+            # Always use default DB for file lookups since models storing code are in default DB
+            db_alias = 'default'
+            
+            # Normalize the path for consistent processing
+            normalized_path = file_path.replace('\\', '/').lstrip('/')
+            
+            logger.info(f"Getting content for file {normalized_path} in project {project_id} using DB {db_alias}")
+            
             # Determine model class based on file path
-            if file_path.endswith('.html') or '/templates/' in file_path:
+            if normalized_path.endswith('.html') or '/templates/' in normalized_path:
                 model_class = TemplateFile
-                logger.debug(f"Using TemplateFile model for {file_path}")
-            elif file_path.startswith('static/') or '/static/' in file_path:
+                logger.debug(f"Using TemplateFile model for {normalized_path}")
+            elif normalized_path.startswith('static/') or '/static/' in normalized_path:
                 model_class = StaticFile
-                logger.debug(f"Using StaticFile model for {file_path}")
-            elif 'views.py' in file_path or file_path.endswith('/views.py'):
+                logger.debug(f"Using StaticFile model for {normalized_path}")
+            elif 'views.py' in normalized_path:
                 model_class = ViewFile
-                logger.debug(f"Using ViewFile model for {file_path}")
-            elif 'models.py' in file_path or file_path.endswith('/models.py'):
+                logger.debug(f"Using ViewFile model for {normalized_path}")
+            elif 'models.py' in normalized_path:
                 model_class = ModelFile
-                logger.debug(f"Using ModelFile model for {file_path}")
-            elif 'forms.py' in file_path or file_path.endswith('/forms.py'):
+                logger.debug(f"Using ModelFile model for {normalized_path}")
+            elif 'forms.py' in normalized_path:
                 model_class = FormFile
-                logger.debug(f"Using FormFile model for {file_path}")
+                logger.debug(f"Using FormFile model for {normalized_path}")
             else:
                 model_class = AppFile
-                logger.debug(f"Using AppFile model for {file_path}")
+                logger.debug(f"Using AppFile model for {normalized_path}")
 
-            # Try to find the file with the exact path
-            file_obj = model_class.objects.using('default').filter(
+            # Try to find the file with the exact path first
+            file_obj = model_class.objects.using(db_alias).filter(
                 project_id=project_id,
-                path=file_path
+                path=normalized_path
             ).first()
 
-            # If not found, try alternative paths based on project structure
-            if not file_obj:
-                logger.debug(f"File not found with exact path {file_path}, trying alternatives")
-                # Strip app prefix if present (e.g., 'posts/views.py' -> 'views.py')
-                base_path = file_path.split('/')[-1] if '/' in file_path else file_path
-                file_obj = model_class.objects.using('default').filter(
-                    project_id=project_id,
-                    path__endswith=base_path
-                ).first()
-                
-                if file_obj:
-                    logger.info(f"Found file using endswith match: {file_obj.path}")
+            if file_obj:
+                logger.info(f"Found file with exact path: {normalized_path}")
+                return file_obj.content
 
-            return file_obj.content if file_obj else ''
-        except Exception as e:
-            logger.error(f"Error getting file content: {str(e)}")
-            return ''
-
-    @database_sync_to_async
-    def file_exists(self, project_id, file_path):
-        """Check if a file exists in the project"""
-        try:
-            # Determine model class based on file path
-            if file_path.startswith('templates/') or file_path.endswith('.html'):
-                model_class = TemplateFile
-            elif file_path.startswith('static/'):
-                model_class = StaticFile
-            elif file_path.startswith('views/') or file_path.endswith('.py'):
-                model_class = ViewFile
-            elif file_path.startswith('models/'):
-                model_class = ModelFile
-            elif file_path.startswith('forms/'):
-                model_class = FormFile
-            else:
-                model_class = AppFile
-
-            return model_class.objects.using('default').filter(
-                project_id=project_id,
-                path=file_path
-            ).exists()
-        except Exception as e:
-            logger.error(f"Error checking file existence: {str(e)}")
-            return False
-
-    @database_sync_to_async
-    def get_view_file_for_template(self, template_files):
-        """Get the corresponding view file for template changes"""
-        try:
-            # Find the first template file
-            template_file = next((f for f in template_files if f.endswith('.html')), None)
-            if not template_file:
-                logger.warning("No template file found in template_files")
-                return None
-
-            logger.info(f"Finding view file for template: {template_file}")
-            # Get the app name dynamically based on context and request
-            app_name = None
-            
-            # First try to get from project context
-            project_context = self.get_project_context(self.project_id)
-            if project_context and project_context.get('apps'):
-                logger.debug(f"Project has {len(project_context['apps'])} apps")
+            # If not found, try with special handling for views.py and other common Django files
+            if 'views.py' in normalized_path:
+                # Extract app name if it's in the format "app/views.py"
+                app_name = None
+                if '/' in normalized_path:
+                    app_name = normalized_path.split('/')[0]
                 
-                # Extract app name from template path if possible
-                template_parts = template_file.split('/')
-                template_app = None
-                
-                # Check for app name in template path
-                if len(template_parts) > 1:
-                    # Handle templates/app/file.html or app/templates/file.html format
-                    if template_parts[0] == 'templates' and len(template_parts) > 2:
-                        template_app = template_parts[1]
-                        logger.debug(f"Template app from templates/app/: {template_app}")
-                    else:
-                        template_app = template_parts[0]
-                        logger.debug(f"Template app from first path part: {template_app}")
-                
-                # Try several strategies to find the right app
-                possible_apps = []
-                
-                # 1. Check if template matches any app
-                if template_app:
-                    for app in project_context['apps']:
-                        if app['name'].lower() == template_app.lower():
-                            possible_apps.append((app['name'], 5)) # High priority
-                            logger.debug(f"Found app match by template path: {app['name']}")
-                
-                # 2. Check if app name is in user request
-                if hasattr(self, 'last_message') and self.last_message:
-                    for app in project_context['apps']:
-                        if app['name'].lower() in self.last_message.lower():
-                            possible_apps.append((app['name'], 4)) # Medium-high priority
-                            logger.debug(f"Found app match in user request: {app['name']}")
-                
-                # 3. Check actual file references
-                for view_file in project_context.get('views', []):
-                    if 'path' in view_file and 'app' in view_file and view_file['app']:
-                        possible_apps.append((view_file['app'], 3)) # Medium priority
-                        logger.debug(f"Found potential app from view file: {view_file['app']}")
-                
-                # 4. Find apps that have views - using direct DB calls is okay since we're inside a sync_to_async method
-                for app in project_context['apps']:
-                    # Check if app has views
-                    view_exists = ViewFile.objects.using('default').filter(
-                        project_id=self.project_id,
-                        path__contains=f"{app['name']}/views").exists()
+                # First try to find any views.py file with a path ending in this app name
+                if app_name:
+                    file_obj = model_class.objects.using(db_alias).filter(
+                        project_id=project_id,
+                        path__endswith=f"{app_name}/views.py"
+                    ).first()
                     
-                    if view_exists:
-                        possible_apps.append((app['name'], 2)) # Low priority
-                        logger.debug(f"App has views: {app['name']}")
-                
-                # 5. Default to first app as fallback
-                if project_context['apps']:
-                    possible_apps.append((project_context['apps'][0]['name'], 1)) # Lowest priority
-                    logger.debug(f"Using first app as fallback: {project_context['apps'][0]['name']}")
-                
-                # Sort by priority and pick the highest
-                if possible_apps:
-                    possible_apps.sort(key=lambda x: x[1], reverse=True)
-                    app_name = possible_apps[0][0]
-                    logger.info(f"Selected app: {app_name} (priority: {possible_apps[0][1]})")
-            
-            if app_name:
+                    if file_obj:
+                        logger.info(f"Found view file with path ending: {file_obj.path}")
+                        return file_obj.content
+                        
                 # Look for views.py in multiple possible locations
                 view_paths = [
                     f"{app_name}/views.py",
@@ -2534,22 +2472,10 @@ Return a valid JSON object with the complete view file:
                     f"{app_name.lower()}/views.py"
                 ]
                 
-                # Get all view files for debugging to see what paths are actually available
-                all_view_files = list(ViewFile.objects.using('default').filter(
-                    project_id=self.project_id
-                ).values_list('path', flat=True))
-                logger.debug(f"All view files in project: {all_view_files}")
-                
                 # Try to find the view file in any of these locations
                 for view_path in view_paths:
                     logger.debug(f"Checking for view at: {view_path}")
-                    
-                    view_exists = ViewFile.objects.using('default').filter(
-                        project_id=self.project_id, 
-                        path=view_path
-                    ).exists()
-                    
-                    if view_exists:
+                    if ViewFile.objects.using('default').filter(project_id=self.project_id, path=view_path).exists():
                         logger.info(f"Found view file: {view_path}")
                         return view_path
                     
@@ -2562,34 +2488,9 @@ Return a valid JSON object with the complete view file:
                     if view_file:
                         logger.info(f"Found view file by endswith: {view_file.path}")
                         return view_file.path
-                    
-                    # Try a more flexible search approach
-                    for candidate_path in all_view_files:
-                        if app_name.lower() in candidate_path.lower() and 'views.py' in candidate_path.lower():
-                            logger.info(f"Found view file by flexible matching: {candidate_path}")
-                            return candidate_path
 
             # Fallback to main views.py or any views.py
             logger.info("Using fallback view file search")
-            
-            # Get all view files again (should already have them from above)
-            all_view_files = list(ViewFile.objects.using('default').filter(
-                project_id=self.project_id
-            ).values_list('path', flat=True))
-            
-            logger.debug(f"Fallback view search - all view files: {all_view_files}")
-            
-            # First try to find views.py directly
-            view_file = ViewFile.objects.using('default').filter(
-                project_id=self.project_id,
-                path="views.py"
-            ).first()
-            
-            if view_file:
-                logger.info(f"Found root views.py file")
-                return "views.py"
-                
-            # Then try to find any views.py file
             view_file = ViewFile.objects.using('default').filter(
                 project_id=self.project_id,
                 path__contains="views.py"
@@ -2599,23 +2500,13 @@ Return a valid JSON object with the complete view file:
                 logger.info(f"Found fallback view file: {view_file.path}")
                 return view_file.path
             
-            # Last resort, specifically look for posts/views.py
-            view_file = ViewFile.objects.using('default').filter(
-                project_id=self.project_id,
-                path__contains="posts/views.py"
-            ).first()
-            
-            if view_file:
-                logger.info(f"Found posts/views.py file: {view_file.path}")
-                return view_file.path
-                
-            # If nothing found, return a default path
             logger.warning("No view file found, using default views.py")
             return "views.py"
         except Exception as e:
             logger.error(f"Error getting view file: {str(e)}")
             logger.error(traceback.format_exc())
             return None
+
     async def update_view_content(self, current_content, diff_data):
         """Update view content to support template changes - dynamic version"""
         try:
@@ -2857,3 +2748,748 @@ Return a valid JSON object with the complete view file:
             logger.error(f"Error analyzing request context: {str(e)}")
             return {}
 
+    async def process_ai_response(self, response):
+        """Process AI response with proper sanitization and file validation"""
+        try:
+            # Always set thread local context at the start and before any DB access
+            from core.thread_local import thread_local
+            thread_local.project_id = self.project_id
+            thread_local.db_alias = f"project_{self.project_id}"
+            
+            # Track original file paths for context preservation
+            original_file_paths = {}
+
+            from .utils import sanitize_json_response
+            sanitized = sanitize_json_response(response) if isinstance(response, str) else response
+            try:
+                data = json.loads(sanitized) if isinstance(sanitized, str) else sanitized
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse AI response as JSON: {str(e)}")
+                await self.send_error_safe("Invalid response format from AI")
+                return
+            
+            # Reset thread_local context again to ensure consistency
+            thread_local.project_id = self.project_id
+            thread_local.db_alias = f"project_{self.project_id}"
+            
+            # Get project structure data for dynamic path resolution
+            project_files = await self.get_project_files(self.project_id)
+            project_context = await self.get_project_context(self.project_id)
+            
+            if not project_files:
+                logger.error("No project files available")
+                await self.send_error_safe("No project files available")
+                return
+            
+            # Reset thread_local context again after async calls
+            thread_local.project_id = self.project_id
+            thread_local.db_alias = f"project_{self.project_id}"
+            
+            # Dynamically identify project structure
+            app_names = [app['name'] for app in project_context.get('apps', [])] if project_context else []
+            file_types = set(info['type'] for info in project_files.values())
+            logger.info(f"Dynamic project structure: {len(app_names)} apps, {len(file_types)} file types")
+            
+            if 'files' in data:
+                valid_files = {}
+                
+                # Store all existing file paths for reference
+                all_existing_files = set(project_files.keys())
+                
+                # Build file path reference for dynamic resolution
+                file_path_map = {}
+                for proj_path, info in project_files.items():
+                    # Add mappings by filename
+                    filename = os.path.basename(proj_path)
+                    if filename not in file_path_map:
+                        file_path_map[filename] = []
+                    file_path_map[filename].append((proj_path, info))
+                    
+                    # Add mappings by app+type
+                    if info['app']:
+                        app_type_key = f"{info['app']}/{info['type']}"
+                        if app_type_key not in file_path_map:
+                            file_path_map[app_type_key] = []
+                        file_path_map[app_type_key].append((proj_path, info))
+                
+                # For each file path in the response
+                for file_path, content in data['files'].items():
+                    # Reset thread_local context before processing each file to ensure consistency
+                    thread_local.project_id = self.project_id
+                    thread_local.db_alias = f"project_{self.project_id}"
+                    
+                    # Store original path for reference
+                    original_file_paths[file_path] = file_path
+                    
+                    # Normalize the path for consistent processing
+                    normalized_path = file_path.replace('\\', '/').lstrip('/')
+                    file_name = os.path.basename(normalized_path)
+                    file_exists = False
+                    final_path = None
+                    
+                    # Extract potential app and file type information
+                    path_parts = normalized_path.split('/')
+                    potential_app = None
+                    for app_name in app_names:
+                        if app_name.lower() in normalized_path.lower():
+                            potential_app = app_name
+                            break
+                    
+                    # Step 1: Try exact path match
+                    if normalized_path in project_files:
+                        file_exists = True
+                        final_path = normalized_path
+                        logger.info(f"Found exact path match: {normalized_path}")
+                    
+                    # Step 2: Try filename match with app context
+                    if not file_exists and file_name in file_path_map:
+                        candidates = file_path_map[file_name]
+                        
+                        # Reset thread_local context again before database operation
+                        thread_local.project_id = self.project_id
+                        thread_local.db_alias = f"project_{self.project_id}"
+                        
+                        # First try with app context if available
+                        if potential_app:
+                            for proj_path, info in candidates:
+                                if info['app'] and info['app'].lower() == potential_app.lower():
+                                    # Explicit existence check with DB to maintain context
+                                    exists = await self.file_exists(self.project_id, proj_path)
+                                    if exists:
+                                        file_exists = True
+                                        final_path = proj_path
+                                        logger.info(f"Found filename+app match: {normalized_path} → {final_path}")
+                                        break
+                        
+                        # If no match with app context, try any match
+                        if not file_exists:
+                            logger.debug(f"Looking for any match for {file_name} among {len(candidates)} candidates")
+                            # Try any candidate path
+                            for proj_path, info in candidates:
+                                # Reset thread_local context before database operation
+                                thread_local.project_id = self.project_id
+                                thread_local.db_alias = f"project_{self.project_id}"
+                                # Explicit existence check with DB to maintain context
+                                exists = await self.file_exists(self.project_id, proj_path)
+                                if exists:
+                                    file_exists = True
+                                    final_path = proj_path
+                                    logger.info(f"Found filename match: {normalized_path} → {final_path}")
+                                    break
+                    
+                    # Step 3: Try direct views.py resolution for common case
+                    if not file_exists and file_name == "views.py" and '/' in normalized_path:
+                        app_part = normalized_path.split('/')[0]
+                        # Check if there's a valid app with that name
+                        if app_part in app_names:
+                            candidate_path = f"{app_part}/views.py"
+                            # Reset thread_local context
+                            thread_local.project_id = self.project_id
+                            thread_local.db_alias = f"project_{self.project_id}"
+                            # Check if this path exists
+                            exists = await self.file_exists(self.project_id, candidate_path)
+                            if exists:
+                                file_exists = True
+                                final_path = candidate_path
+                                logger.info(f"Found view file match: {normalized_path} → {final_path}")
+                    
+                    # Step 4: If not found, find appropriate location based on file type
+                    if not file_exists:
+                        # Reset thread_local context
+                        thread_local.project_id = self.project_id
+                        thread_local.db_alias = f"project_{self.project_id}"
+                        
+                        # Query for an app to use
+                        if potential_app:
+                            app_exists = await self._is_valid_app(potential_app)
+                            if app_exists:
+                                # Determine file type
+                                file_type = self._get_file_type(file_name)
+                                
+                                # Look for similar files of same type in this app
+                                app_type_key = f"{potential_app}/{file_type}"
+                                if app_type_key in file_path_map:
+                                    # Use existing path pattern for similar files
+                                    template_path, _ = file_path_map[app_type_key][0]
+                                    dir_path = os.path.dirname(template_path)
+                                    final_path = f"{dir_path}/{file_name}" if dir_path else file_name
+                                    logger.info(f"Creating new file using app pattern: {final_path}")
+                                else:
+                                    # Create new path based on common patterns
+                                    if file_type == 'view':
+                                        final_path = f"{potential_app}/views.py"
+                                    elif file_type == 'template':
+                                        final_path = f"{potential_app}/templates/{file_name}"
+                                    elif file_type == 'static':
+                                        final_path = f"{potential_app}/static/{file_name}"
+                                    else:
+                                        final_path = f"{potential_app}/{file_name}"
+                                    logger.info(f"Creating new file with standard pattern: {final_path}")
+                            else:
+                                # Try to find a matching app that DOES exist
+                                existing_apps = []
+                                for app in app_names:
+                                    # Reset thread_local context
+                                    thread_local.project_id = self.project_id
+                                    thread_local.db_alias = f"project_{self.project_id}"
+                                    app_exists = await self._is_valid_app(app)
+                                    if app_exists:
+                                        existing_apps.append(app)
+                                
+                                if existing_apps:
+                                    file_type = self._get_file_type(file_name)
+                                    
+                                    # Use the first valid app as fallback
+                                    selected_app = existing_apps[0]
+                                    if file_type == 'view':
+                                        final_path = f"{selected_app}/views.py"
+                                    elif file_type == 'template':
+                                        final_path = f"{selected_app}/templates/{file_name}"
+                                    elif file_type == 'static':
+                                        final_path = f"{selected_app}/static/{file_name}"
+                                    else:
+                                        final_path = f"{selected_app}/{file_name}"
+                                    logger.info(f"Creating new file with existing app: {final_path}")
+                                else:
+                                    # No valid apps found, use global file type patterns
+                                    file_type = self._get_file_type(file_name)
+                                    if file_type == 'template':
+                                        final_path = f"templates/{file_name}"
+                                    elif file_type == 'static':
+                                        final_path = f"static/{file_name}"
+                                    else:
+                                        final_path = file_name
+                                    logger.info(f"Creating new file with type pattern: {final_path}")
+                        else:
+                            # No app context, try to infer from filename
+                            file_type = self._get_file_type(file_name)
+                            
+                            # Look for similar files to determine placement
+                            similar_file_types = [(path, info) for path, info in project_files.items() 
+                                                if info['type'] == file_type]
+                            
+                            if similar_file_types:
+                                # Use existing structure as template
+                                template_path, _ = similar_file_types[0]
+                                dir_path = os.path.dirname(template_path)
+                                final_path = f"{dir_path}/{file_name}" if dir_path else file_name
+                                logger.info(f"Creating new file using existing structure: {final_path}")
+                            else:
+                                # Use common conventions
+                                if file_type == 'template':
+                                    final_path = f"templates/{file_name}"
+                                elif file_type == 'static':
+                                    final_path = f"static/{file_name}"
+                                else:
+                                    final_path = file_name
+                                logger.info(f"Creating new file with conventional pattern: {final_path}")
+                    
+                    # Normalize the final path to avoid duplicates
+                    if final_path:
+                        final_path = final_path.replace('\\', '/').lstrip('/')
+                        valid_files[final_path] = content
+                        # Track relationship between original and final paths
+                        original_file_paths[file_path] = final_path
+                    else:
+                        logger.warning(f"Could not determine path for {normalized_path}, using original path")
+                        valid_files[normalized_path] = content
+                
+                data['files'] = valid_files
+            
+            # Create change request and display diff modal
+            if data.get('files'):
+                try:
+                    # Reset thread_local context before creating change request
+                    thread_local.project_id = self.project_id
+                    thread_local.db_alias = f"project_{self.project_id}"
+                    
+                    # Prepare file diffs for the change request
+                    file_diffs = {}
+                    for file_path, content in data['files'].items():
+                        try:
+                            existing_content = await self.get_file_content(file_path, self.project_id)
+                            file_diffs[file_path] = {
+                                'before': existing_content,
+                                'after': content,
+                            }
+                        except Exception as file_error:
+                            logger.error(f"Error getting content for {file_path}: {str(file_error)}")
+                    
+                    if file_diffs:
+                        # Create change request
+                        change_id = await self.create_change_request(
+                            conversation_id=self.conversation.id if hasattr(self, 'conversation') else None,
+                            project_id=self.project_id,
+                            file_type='multiple',
+                            diff='unified diff',
+                            files=file_diffs
+                        )
+                        
+                        # Prepare preview content
+                        preview_content = await self.prepare_preview_content(file_diffs)
+                        
+                        # Send diff modal to client
+                        await self.send_diff_modal(change_id, 'unified diff', file_diffs, preview_content)
+                
+                except Exception as e:
+                    logger.error(f"Error creating change request or showing diff modal: {str(e)}")
+                    logger.error(traceback.format_exc())
+            
+            return data
+        except Exception as e:
+            logger.error(f"Error processing AI response: {str(e)}")
+            logger.error(traceback.format_exc())
+            return None
+
+    async def _generate_possible_paths(self, normalized_path, app_name, file_type, project_files):
+        """Generate possible paths based on file type and app context"""
+        possible_paths = {normalized_path}
+        
+        if not app_name:
+            # Try to infer app name from existing files
+            for proj_path in project_files:
+                if normalized_path in proj_path:
+                    inferred_app = proj_path.split('/')[0]
+                    if await self._is_valid_app(inferred_app):
+                        app_name = inferred_app
+                        break
+
+        if app_name:
+            if file_type == 'view':
+                possible_paths.update([
+                    f"{app_name}/views.py",
+                    f"{app_name}/views/{normalized_path}",
+                    f"views/{app_name}.py",
+                    normalized_path
+                ])
+            elif file_type == 'template':
+                possible_paths.update([
+                    f"{app_name}/templates/{normalized_path}",
+                    f"templates/{app_name}/{normalized_path}",
+                    f"templates/{normalized_path}",
+                    normalized_path
+                ])
+            elif file_type == 'static':
+                possible_paths.update([
+                    f"{app_name}/static/{normalized_path}",
+                    f"static/{app_name}/{normalized_path}",
+                    f"static/{normalized_path}",
+                    normalized_path
+                ])
+        
+        return possible_paths
+
+    async def _check_path_match(self, proj_path, normalized_path, app_name, file_type):
+        """Check if project path matches the target path considering context"""
+        if not proj_path or not normalized_path:
+            return False
+            
+        proj_parts = proj_path.split('/')
+        norm_parts = normalized_path.split('/')
+        
+        # Check for view files specifically
+        if file_type == 'view' and 'views.py' in proj_path:
+            return (app_name is None or app_name.lower() in proj_path.lower())
+            
+        # Check if paths match considering app context
+        if app_name:
+            return (
+                proj_path.endswith(normalized_path) or
+                normalized_path.endswith(proj_path) or
+                (app_name.lower() in proj_path.lower() and norm_parts[-1] in proj_parts)
+            )
+        
+        return (
+            proj_path.endswith(normalized_path) or
+            normalized_path.endswith(proj_path) or
+            norm_parts[-1] in proj_parts
+        )
+
+    @database_sync_to_async
+    def _is_valid_app(self, app_name):
+        """Check if an app name is valid in the project, using the correct DB context."""
+        try:
+            from core.thread_local import thread_local
+            from create_api.models import App
+            
+            # Always set thread local context for project operations
+            thread_local.project_id = self.project_id
+            thread_local.db_alias = f"project_{self.project_id}"
+            
+            # But use default DB for App lookups
+            return App.objects.using('default').filter(project_id=self.project_id, name=app_name).exists()
+        except Exception as e:
+            logger.error(f"Error checking app validity: {str(e)}")
+            return False
+            
+    @database_sync_to_async
+    def file_exists(self, project_id, file_path):
+        """Check if a file exists in the project, using the correct DB context.
+        This method is used by process_ai_response to validate file paths."""
+        try:
+            from core.thread_local import thread_local
+            # Set thread local context for project operations
+            thread_local.project_id = project_id
+            thread_local.db_alias = f"project_{project_id}"
+            
+            # Always use default DB for file lookups since files are stored in default DB
+            db_alias = 'default'
+            
+            # Normalize the path for consistent lookup
+            normalized_path = file_path.replace('\\', '/').lstrip('/')
+            
+            logger.info(f"Checking if file exists: '{normalized_path}' in project {project_id}")
+            
+            # Determine model class based on file path
+            if normalized_path.endswith('.html') or '/templates/' in normalized_path:
+                from create_api.models import TemplateFile
+                model_class = TemplateFile
+            elif normalized_path.startswith('static/') or '/static/' in normalized_path:
+                from create_api.models import StaticFile
+                model_class = StaticFile
+            elif 'views.py' in normalized_path:
+                from create_api.models import ViewFile
+                model_class = ViewFile
+            elif 'models.py' in normalized_path:
+                from create_api.models import ModelFile
+                model_class = ModelFile
+            elif 'forms.py' in normalized_path:
+                from create_api.models import FormFile
+                model_class = FormFile
+            else:
+                from create_api.models import AppFile
+                model_class = AppFile
+            
+            # Check if file exists with exact path
+            exists = model_class.objects.using(db_alias).filter(
+                project_id=project_id,
+                path=normalized_path
+            ).exists()
+            
+            if exists:
+                logger.info(f"Found exact match for '{normalized_path}'")
+                return True
+                
+            # Special handling for views.py for app-specific views
+            if 'views.py' in normalized_path and '/' in normalized_path:
+                app_name = normalized_path.split('/')[0]
+                # Try with endswith to match different path patterns
+                from create_api.models import ViewFile
+                exists = ViewFile.objects.using(db_alias).filter(
+                    project_id=project_id, 
+                    path__endswith=f"{app_name}/views.py"
+                ).exists()
+                
+                if exists:
+                    logger.info(f"Found view file match for '{normalized_path}' using endswith")
+                    return True
+            
+            logger.debug(f"File '{normalized_path}' does not exist")
+            return False
+            
+        except Exception as e:
+            logger.error(f"Error checking file existence: {str(e)}")
+            logger.error(traceback.format_exc())
+            return False
+
+    @database_sync_to_async
+    def get_file_content(self, file_path, project_id):
+        """Get the content of an existing file"""
+        try:
+            from core.thread_local import thread_local
+            # Set thread local context for project operations
+            thread_local.project_id = project_id
+            thread_local.db_alias = f"project_{project_id}"
+            
+            # Always use default DB for file lookups since models storing code are in default DB
+            db_alias = 'default'
+            
+            # Normalize the path for consistent processing
+            normalized_path = file_path.replace('\\', '/').lstrip('/')
+            
+            logger.info(f"Getting content for file {normalized_path} in project {project_id} using DB {db_alias}")
+            
+            # Determine model class based on file path
+            if normalized_path.endswith('.html') or '/templates/' in normalized_path:
+                model_class = TemplateFile
+                logger.debug(f"Using TemplateFile model for {normalized_path}")
+            elif normalized_path.startswith('static/') or '/static/' in normalized_path:
+                model_class = StaticFile
+                logger.debug(f"Using StaticFile model for {normalized_path}")
+            elif 'views.py' in normalized_path:
+                model_class = ViewFile
+                logger.debug(f"Using ViewFile model for {normalized_path}")
+            elif 'models.py' in normalized_path:
+                model_class = ModelFile
+                logger.debug(f"Using ModelFile model for {normalized_path}")
+            elif 'forms.py' in normalized_path:
+                model_class = FormFile
+                logger.debug(f"Using FormFile model for {normalized_path}")
+            else:
+                model_class = AppFile
+                logger.debug(f"Using AppFile model for {normalized_path}")
+
+            # Try to find the file with the exact path first
+            file_obj = model_class.objects.using(db_alias).filter(
+                project_id=project_id,
+                path=normalized_path
+            ).first()
+
+            if file_obj:
+                logger.info(f"Found file with exact path: {normalized_path}")
+                return file_obj.content
+
+            # If not found, try with special handling for views.py and other common Django files
+            if 'views.py' in normalized_path:
+                # Extract app name if it's in the format "app/views.py"
+                app_name = None
+                if '/' in normalized_path:
+                    app_name = normalized_path.split('/')[0]
+                
+                # First try to find any views.py file with a path ending in this app name
+                if app_name:
+                    file_obj = model_class.objects.using(db_alias).filter(
+                        project_id=project_id,
+                        path__endswith=f"{app_name}/views.py"
+                    ).first()
+                    
+                    if file_obj:
+                        logger.info(f"Found view file with path ending: {file_obj.path}")
+                        return file_obj.content
+                        
+                # Look for views.py in multiple possible locations
+                view_paths = [
+                    f"{app_name}/views.py",
+                    f"apps/{app_name}/views.py",
+                    f"{app_name.lower()}/views.py"
+                ]
+                
+                # Try to find the view file in any of these locations
+                for view_path in view_paths:
+                    logger.debug(f"Checking for view at: {view_path}")
+                    if ViewFile.objects.using('default').filter(project_id=self.project_id, path=view_path).exists():
+                        logger.info(f"Found view file: {view_path}")
+                        return view_path
+                    
+                    # Also try with endswith in case the path structure varies
+                    view_file = ViewFile.objects.using('default').filter(
+                        project_id=self.project_id,
+                        path__endswith=f"/{view_path}"
+                    ).first()
+                    
+                    if view_file:
+                        logger.info(f"Found view file by endswith: {view_file.path}")
+                        return view_file.path
+
+            # Fallback to main views.py or any views.py
+            logger.info("Using fallback view file search")
+            view_file = ViewFile.objects.using('default').filter(
+                project_id=self.project_id,
+                path__contains="views.py"
+            ).first()
+            
+            if view_file:
+                logger.info(f"Found fallback view file: {view_file.path}")
+                return view_file.path
+            
+            logger.warning("No view file found, using default views.py")
+            return "views.py"
+        except Exception as e:
+            logger.error(f"Error getting view file: {str(e)}")
+            logger.error(traceback.format_exc())
+            return None
+
+    async def update_view_content(self, current_content, diff_data):
+        """Update view content to support template changes - dynamic version"""
+        try:
+            # Get project context for potential use in view updates
+            project_context = await self.get_project_context(self.project_id)
+            
+            # Don't modify content if no PostList class (wrong file)
+            if 'class PostList' not in current_content:
+                logger.debug("No PostList class found in content, skipping view update")
+                return current_content
+
+            logger.info("Found PostList class, preparing to update view content")
+            
+            # Scan diff data to determine what needs to be added
+            has_analytics = False
+            has_charts = False
+            has_templates = False
+            template_features = set()
+            
+            # Analyze all files to determine required features
+            for file_path, file_data in diff_data['files'].items():
+                file_content = file_data.get('after', '')
+                metadata = file_data.get('file_metadata', {})
+                
+                # Check file content for features
+                if 'analytics' in file_path.lower() or 'analytics' in file_content.lower():
+                    has_analytics = True
+                    template_features.add('analytics')
+                
+                if 'chart' in file_path.lower() or 'chart' in file_content.lower():
+                    has_charts = True
+                    template_features.add('chart')
+                
+                if metadata.get('is_template', False):
+                    has_templates = True
+                    
+                    # Analyze template content to determine features
+                    if '{% include' in file_content:
+                        template_features.add('includes')
+                    if 'analytics' in file_content.lower():
+                        template_features.add('analytics')
+                    if 'chart' in file_content.lower():
+                        template_features.add('chart')
+                    if 'comment' in file_content.lower():
+                        template_features.add('comments')
+            
+            logger.debug(f"Detected template features: {template_features}")
+            
+            # Required imports based on features
+            needed_imports = set()
+            
+            if 'analytics' in template_features or 'chart' in template_features:
+                needed_imports.update([
+                    'from django.utils import timezone',
+                    'from django.db.models import Count',
+                    'from django.db.models.functions import TruncDate',
+                    'from datetime import timedelta',
+                    'import json'
+                ])
+            
+            if 'comments' in template_features:
+                needed_imports.add('from django.db.models import Count')
+            
+            # Add imports if they don't exist already
+            new_content = current_content
+            for imp in needed_imports:
+                if imp not in new_content:
+                    logger.debug(f"Adding import: {imp}")
+                    # Find the right place to add the import
+                    import_end = 0
+                    for line in new_content.split('\n'):
+                        if line.startswith('import ') or line.startswith('from '):
+                            import_end = new_content.find(line) + len(line)
+                    
+                    # Add after last import or at the beginning
+                    if import_end > 0:
+                        new_content = new_content[:import_end] + '\n' + imp + new_content[import_end:]
+                    else:
+                        new_content = imp + '\n' + new_content
+
+            # Check for features that require context data
+            need_context_data = False
+            required_features = []
+            
+            # Identify what features need context data
+            for feature in template_features:
+                if feature in ['analytics', 'chart', 'graph', 'dashboard', 'visualization', 'stats']:
+                    need_context_data = True
+                    required_features.append(feature)
+            
+            if need_context_data:
+                logger.info(f"Adding context data support for features: {required_features}")
+                
+                # Generate context data method dynamically based on required features
+                # This is just a skeleton that will be filled with AI-generated content
+                feature_prompts = {
+                    "analytics": "Add code to collect analytics data",
+                    "chart": "Add code to prepare chart data",
+                    "graph": "Add code to prepare graph data",
+                    "dashboard": "Add code to prepare dashboard metrics"
+                }
+                
+                # Build prompt for context data generation
+                context_prompt = "\n".join([feature_prompts.get(feature, f"Support {feature}") 
+                                         for feature in required_features])
+                
+                # Let the template be generated by the AI based on the specific features needed
+                analytics_context = """
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        if self.request.user.is_authenticated:
+                            # Dynamic context data based on required features
+            # Get logger reference from module if not defined in function scope
+            log_ref = logging.getLogger(__name__) if 'logger' not in locals() else logger
+            log_ref.debug(f"Preparing context data for features: {required_features}")
+            
+            # Common data preparation code
+            end_date = timezone.now()
+            start_date = end_date - timedelta(days=10)
+            
+            # Get data based on requested features
+            data_objects = {}
+            feature_data = {}
+            
+            # Add data for appropriate models based on the view's purpose
+            try:
+                # This section is intentionally generic and will be replaced by the AI
+                # with specific model queries based on the template's needs
+                pass
+            except Exception as e:
+                logger.error(f"Error preparing feature data: {str(e)}")
+            
+            # Add all needed data to context
+            context.update(feature_data)
+            
+            # DEBUG: Log data being added to context
+            logger.debug(f"Added context data for {len(feature_data)} features")
+        
+        return context"""
+
+                # Replace or add get_context_data method
+                if 'def get_context_data' in new_content:
+                    # Find the method and replace it
+                    start = new_content.find('def get_context_data')
+                    # Find the end of the function - looking for return and the end of the line after it
+                    end_pos = new_content.find('return context', start)
+                    if end_pos != -1:
+                        # Find the end of the line containing 'return context'
+                        line_end = new_content.find('\n', end_pos)
+                        if line_end != -1:
+                            end = line_end
+                        else:
+                            end = len(new_content)
+                    
+                    logger.debug(f"Replacing get_context_data method from position {start} to {end}")
+                    new_content = new_content[:start] + analytics_context + new_content[end:]
+                else:
+                    # Add the method to the PostList class
+                    class_start = new_content.find('class PostList')
+                    
+                    # Find a good place to insert the method
+                    insert_pos = -1
+                    
+                    # Look for existing methods in the class
+                    method_pos = new_content.find('\n    def ', class_start)
+                    if method_pos != -1:
+                        # Insert before the next method after the class definition
+                        lines = new_content[class_start:method_pos].split('\n')
+                        if len(lines) > 1:  # Make sure we have the class definition line plus at least one more
+                            # Find where the class attributes/properties end
+                            for i, line in enumerate(lines[1:], 1):
+                                if not line.strip() or not line.startswith('    ') or line.startswith('    def '):
+                                    insert_pos = class_start + sum(len(l) + 1 for l in lines[:i])
+                                    break
+                    
+                    if insert_pos == -1:
+                        # If we couldn't find a good position, just add it after the class declaration
+                        class_line_end = new_content.find('\n', class_start)
+                        if class_line_end != -1:
+                            insert_pos = class_line_end + 1
+                        else:
+                            insert_pos = len(new_content)
+                    
+                    logger.debug(f"Adding get_context_data method at position {insert_pos}")
+                    new_content = new_content[:insert_pos] + analytics_context + new_content[insert_pos:]
+
+            return new_content
+
+        except Exception as e:
+            logger.error(f"Error updating view content: {str(e)}")
+            logger.error(traceback.format_exc())
+            return current_content
+
+    # _generate_new_file_path method removed as it's been replaced with fully dynamic path resolution
