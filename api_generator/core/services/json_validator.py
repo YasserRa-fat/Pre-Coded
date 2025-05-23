@@ -564,9 +564,24 @@ Return the complete, valid file content with proper structure."""
         logger.debug("=== Starting JSON Preprocessing ===")
         
         try:
-            # If input is already a dictionary, return it as is
+            # If input is already a dictionary, normalize template paths
             if isinstance(text, dict):
-                logger.debug("Input is already a dictionary, skipping preprocessing")
+                logger.debug("Input is already a dictionary, normalizing template paths")
+                if 'files' in text and isinstance(text['files'], dict):
+                    normalized_files = {}
+                    for file_path, content in text['files'].items():
+                        # Normalize template paths to match project structure
+                        if file_path.endswith('.html'):
+                            # Extract just the filename for templates
+                            normalized_path = file_path.split('/')[-1]
+                            # Only add templates/ prefix if not already present
+                            if not normalized_path.startswith('templates/'):
+                                normalized_path = f"templates/{normalized_path}"
+                            logger.debug(f"Normalized template path: {file_path} -> {normalized_path}")
+                            normalized_files[normalized_path] = content
+                        else:
+                            normalized_files[file_path] = content
+                    text['files'] = normalized_files
                 return text
                 
             # Remove markdown code block markers
@@ -647,7 +662,6 @@ Return the complete, valid file content with proper structure."""
                 # Ensure proper escaping for placeholders
                 escaped_content = content.replace('"', '\\"').replace('\n', '\\n')
                 text = text.replace(f'"{key}"', f'"{escaped_content}"')
-            
             # Final cleanup
             text = text.strip()
             
@@ -661,33 +675,36 @@ Return the complete, valid file content with proper structure."""
             except json.JSONDecodeError as e:
                 logger.error(f"JSON still invalid after preprocessing: {str(e)}")
                 cls._debug_json_error(text, e)
+
+            # Try to parse as JSON to normalize template paths
+            try:
+                data = json.loads(text)
+                if isinstance(data, dict) and 'files' in data and isinstance(data['files'], dict):
+                    normalized_files = {}
+                    for file_path, content in data['files'].items():
+                        # Normalize template paths to match project structure
+                        if file_path.endswith('.html'):
+                            # Extract just the filename for templates
+                            normalized_path = file_path.split('/')[-1]
+                            # Only add templates/ prefix if not already present
+                            if not normalized_path.startswith('templates/'):
+                                normalized_path = f"templates/{normalized_path}"
+                            logger.debug(f"Normalized template path: {file_path} -> {normalized_path}")
+                            normalized_files[normalized_path] = content
+                        else:
+                            normalized_files[file_path] = content
+                    data['files'] = normalized_files
+                    text = json.dumps(data)
+            except json.JSONDecodeError:
+                logger.warning("Failed to parse JSON for template path normalization")
+                pass
             
             return text
             
         except Exception as e:
-            logger.error(f"Error in preprocessing: {str(e)}")
+            logger.error(f"Error in preprocess_json: {str(e)}")
             logger.error(traceback.format_exc())
-            return text
-
-    @staticmethod
-    def _fix_json_formatting(text: str) -> str:
-        """Fix common JSON formatting issues"""
-        # Remove trailing commas
-        text = re.sub(r',(\s*[}\]])', r'\1', text)
-        
-        # Fix missing quotes around property names
-        text = re.sub(r'([{,]\s*)(\w+)(:)', r'\1"\2"\3', text)
-        
-        # Fix missing commas between elements
-        text = re.sub(r'(["}\]])\s*({"?\w+"|[\[{])', r'\1,\2', text)
-        
-        # Fix spaces in property names
-        text = re.sub(r'"([^"]+)\s+([^"]+)":', r'"\1\2":', text)
-        
-        # Fix unescaped newlines in strings
-        text = re.sub(r'(?<!\\)\n', '\\n', text)
-        
-        return text
+            return text if isinstance(text, str) else json.dumps(text)
 
     @staticmethod
     def _handle_code_content(content: str) -> str:
