@@ -681,6 +681,12 @@ async def make_initial_ai_call(conversation, text, files_data):
         if 'views' in project_context:
             existing_views = [view['path'] for view in project_context['views']]
         logger.debug(f"Existing view files: {existing_views}")
+
+        # Get list of existing template files
+        existing_templates = []
+        if 'templates' in project_context:
+            existing_templates = [template['path'] for template in project_context['templates']]
+        logger.debug(f"Existing template files: {existing_templates}")
         
         # Check if this is an analytics-related request
         is_analytics_feature = any(keyword in text.lower() for keyword in 
@@ -697,7 +703,7 @@ async def make_initial_ai_call(conversation, text, files_data):
         # Add analytics-specific instructions if needed
         analytics_instructions = ""
         if is_analytics_feature:
-            analytics_instructions = """
+            analytics_instructions = f"""
 ANALYTICS FEATURE INSTRUCTIONS:
 1. ONLY use EXISTING view files - DO NOT create new ones
 2. For graphs/charts, include:
@@ -708,6 +714,14 @@ ANALYTICS FEATURE INSTRUCTIONS:
 4. Ensure all imports are included based on the analytics functionality needed
 5. When showing analytics "for the past 10 days", ensure data is properly filtered
 6. Include proper data aggregation using Django's ORM functions
+
+CRITICAL TEMPLATE PATH INSTRUCTIONS:
+1. You MUST ONLY use these exact template paths that exist in the database:
+   {', '.join(existing_templates)}
+2. DO NOT modify or construct new template paths
+3. Use the exact paths as shown above - they are already in the correct format
+4. If you need to reference a template, use ONLY paths from this list
+5. DO NOT add any prefix like 'users/templates/' or 'templates/' - use the exact paths as shown
 """
 
         # Create the prompt with properly escaped JSON example
@@ -718,6 +732,7 @@ Project Context:
 - App Name: {files_data.get('app_name')}
 - User Request: {text}
 - Existing View Files: {', '.join(existing_views)}
+- Existing Template Files: {', '.join(existing_templates)}
 
 CRITICAL INSTRUCTIONS:
 1. ONLY use EXISTING view files - NEVER create new ones
@@ -727,6 +742,7 @@ CRITICAL INSTRUCTIONS:
 5. When handling graphs or charts, include JS files for rendering AND use existing view files for data
 6. EVERY file in the response must be a COMPLETE file, not partial content
 7. DO NOT create new view files - modify existing ones only
+8. TEMPLATE PATHS: Use ONLY these exact paths: {', '.join(existing_templates)}
 {analytics_instructions}
 
 CRITICAL: YOU MUST RETURN ONLY A VALID JSON OBJECT WITH THIS EXACT STRUCTURE:
