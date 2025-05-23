@@ -218,6 +218,15 @@ export default function ProjectDetail() {
                   {renderFileCards(app.app_url_files, 'url-files', 'urls.py', app.id)}
                   {renderFileCards(app.template_files, 'template-files', null, app.id)}
                   {renderFileCards(app.app_files, 'app-files', null, app.id)}
+                  <div 
+                    className="file-card file-card--template"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      navigate(`/projects/${projectId}/apps/${app.id}/template-files`);
+                    }}
+                  >
+                    <h6 className="file-card__title">Templates</h6>
+                  </div>
                 </div>
               </div>
             ))

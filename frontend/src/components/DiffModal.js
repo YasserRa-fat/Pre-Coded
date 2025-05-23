@@ -158,7 +158,7 @@ export default function DiffModal({
   isModalOpen,
   previewUrls = {},
 }) {
-  console.log('DiffModal rendered with:', { projectId, changeId, files, previewUrls });
+  console.log('DiffModal files prop:', files); // Debug log for files prop
   
   const [beforeUrl, setBeforeUrl] = useState(null);
   const [afterUrl, setAfterUrl] = useState(null);
@@ -170,6 +170,14 @@ export default function DiffModal({
   const [viewMode, setViewMode] = useState('code'); // 'code' or 'preview'
   const [isProcessing, setIsProcessing] = useState(false);
   const modalRef = useRef(null);
+
+  // Debug effect to log when files change
+  useEffect(() => {
+    console.log('Files changed:', files);
+    if (files && files.length > 0) {
+      console.log('First file:', files[0]);
+    }
+  }, [files]);
 
   // Handle click outside
   useEffect(() => {
@@ -253,23 +261,54 @@ export default function DiffModal({
     };
   }, [projectId, changeId, previewUrls]);
 
-  const renderFileList = () => {
-    if (!files || files.length === 0) return null;
+  const loadPreview = (type) => {
+    const BACKEND = process.env.REACT_APP_BACKEND_URL || 'http://localhost:8000';
     
+    if (type === 'before') {
+      setBeforeError(null);
+      setLoadingBefore(true);
+      const beforeFullUrl = previewUrls.before.startsWith('http') 
+        ? previewUrls.before 
+        : `${BACKEND}${previewUrls.before}`;
+      setBeforeUrl(beforeFullUrl);
+      setLoadingBefore(false);
+    } else {
+      setAfterError(null);
+      setLoadingAfter(true);
+      const afterFullUrl = previewUrls.after.startsWith('http') 
+        ? previewUrls.after 
+        : `${BACKEND}${previewUrls.after}`;
+      setAfterUrl(afterFullUrl);
+      setLoadingAfter(false);
+    }
+  };
+
+  const renderFileList = () => {
+    if (!files || files.length === 0) {
+      console.log('No files to render');
+      return null;
+    }
+
     return (
       <div className="file-list-section">
         <h4>Modified Files</h4>
-        <div className="file-list">
-          {files.map((file, index) => (
-            <div 
-              key={file.filePath} 
-              className={`file-item ${index === selectedFileIndex ? 'selected' : ''}`}
-              onClick={() => setSelectedFileIndex(index)}
-            >
-              {file.filePath}
-            </div>
-          ))}
+        <div className="modified-files-count">
+          {files.length} file{files.length !== 1 ? 's' : ''} modified
         </div>
+        <ul className="file-list">
+          {files.map((file, index) => {
+            console.log('Rendering file:', file); // Debug log for each file
+            return (
+              <li
+                key={index}
+                className={`file-item ${index === selectedFileIndex ? 'active' : ''}`}
+                onClick={() => setSelectedFileIndex(index)}
+              >
+                {file.filePath || file.path || `File ${index + 1}`}
+              </li>
+            );
+          })}
+        </ul>
       </div>
     );
   };
@@ -278,9 +317,10 @@ export default function DiffModal({
     if (!files || files.length === 0 || !files[selectedFileIndex]) return null;
     
     const file = files[selectedFileIndex];
+    console.log('Current file:', file); // Add this to debug
     return (
       <div className="file-diff-section">
-        <h4>Changes in {file.filePath}</h4>
+        <h4>Changes in {file.filePath || file.path}</h4>
         <div className="diff-container">
           <div className="diff-pane before">
             <h5>Before</h5>
@@ -300,107 +340,103 @@ export default function DiffModal({
   };
 
   const renderPreview = () => {
-    const BACKEND = process.env.REACT_APP_BACKEND_URL || 'http://localhost:8000';
-    
     return (
       <div className="preview-section">
-        <h4>Live Preview</h4>
         <div className="preview-comparison">
           <div className="preview-pane">
-            <h5>Before</h5>
-            {beforeError ? (
+            <div className="preview-header">
+              <h4>Before Changes</h4>
+              <div className="preview-nav">
+                <button 
+                  className="preview-nav-btn" 
+                  onClick={() => {
+                    const frame = document.getElementById('beforePreview');
+                    if (frame) frame.contentWindow.history.back();
+                  }}
+                  title="Go Back"
+                >
+                  ←
+                </button>
+                <button 
+                  className="preview-nav-btn" 
+                  onClick={() => {
+                    const frame = document.getElementById('beforePreview');
+                    if (frame) frame.contentWindow.history.forward();
+                  }}
+                  title="Go Forward"
+                >
+                  →
+                </button>
+              </div>
+            </div>
+            {loadingBefore ? (
+              <div className="preview-loading">
+                <div className="loading-spinner" />
+                <p>Loading preview...</p>
+              </div>
+            ) : beforeError ? (
               <div className="preview-error">
                 <p>{beforeError}</p>
-                <button 
-                  className="retry-btn"
-                  onClick={() => {
-                    setBeforeError(null);
-                    const beforeFullUrl = previewUrls.before.startsWith('http') 
-                      ? previewUrls.before 
-                      : `${BACKEND}${previewUrls.before}`;
-                    setBeforeUrl(beforeFullUrl);
-                  }}
-                >
+                <button className="retry-btn" onClick={() => loadPreview('before')}>
                   Retry
                 </button>
               </div>
-            ) : loadingBefore ? (
-              <div className="preview-loading">
-                <div className="loading-spinner"></div>
-                <p>Loading before preview...</p>
-              </div>
-            ) : beforeUrl ? (
+            ) : (
               <iframe
+                id="beforePreview"
                 src={beforeUrl}
                 className="preview-iframe"
-                title="Before Preview"
-                onError={() => setBeforeError('Error loading before preview - the preview server might be unavailable')}
+                title="Before Changes"
                 sandbox="allow-same-origin allow-scripts allow-forms"
               />
-            ) : (
-              <div className="preview-error">
-                <p>Failed to load before preview</p>
-                <button 
-                  className="retry-btn"
-                  onClick={() => {
-                    const beforeFullUrl = previewUrls.before.startsWith('http') 
-                      ? previewUrls.before 
-                      : `${BACKEND}${previewUrls.before}`;
-                    setBeforeUrl(beforeFullUrl);
-                  }}
-                >
-                  Retry
-                </button>
-              </div>
             )}
           </div>
-
           <div className="preview-pane">
-            <h5>After</h5>
-            {afterError ? (
+            <div className="preview-header">
+              <h4>After Changes</h4>
+              <div className="preview-nav">
+                <button 
+                  className="preview-nav-btn" 
+                  onClick={() => {
+                    const frame = document.getElementById('afterPreview');
+                    if (frame) frame.contentWindow.history.back();
+                  }}
+                  title="Go Back"
+                >
+                  ←
+                </button>
+                <button 
+                  className="preview-nav-btn" 
+                  onClick={() => {
+                    const frame = document.getElementById('afterPreview');
+                    if (frame) frame.contentWindow.history.forward();
+                  }}
+                  title="Go Forward"
+                >
+                  →
+                </button>
+              </div>
+            </div>
+            {loadingAfter ? (
+              <div className="preview-loading">
+                <div className="loading-spinner" />
+                <p>Loading preview...</p>
+              </div>
+            ) : afterError ? (
               <div className="preview-error">
                 <p>{afterError}</p>
-                <button 
-                  className="retry-btn"
-                  onClick={() => {
-                    setAfterError(null);
-                    const afterFullUrl = previewUrls.after.startsWith('http') 
-                      ? previewUrls.after 
-                      : `${BACKEND}${previewUrls.after}`;
-                    setAfterUrl(afterFullUrl);
-                  }}
-                >
+                <button className="retry-btn" onClick={() => loadPreview('after')}>
                   Retry
                 </button>
               </div>
-            ) : loadingAfter ? (
-              <div className="preview-loading">
-                <div className="loading-spinner"></div>
-                <p>Loading after preview...</p>
-              </div>
-            ) : afterUrl ? (
+            ) : (
               <iframe
+                id="afterPreview"
                 src={afterUrl}
                 className="preview-iframe"
-                title="After Preview"
-                onError={() => setAfterError('Error loading after preview - the preview server might be unavailable')}
+                title="After Changes"
                 sandbox="allow-same-origin allow-scripts allow-forms"
               />
-            ) : (
-              <div className="preview-error">
-                <p>Failed to load after preview</p>
-                <button 
-                  className="retry-btn"
-                  onClick={() => {
-                    const afterFullUrl = previewUrls.after.startsWith('http') 
-                      ? previewUrls.after 
-                      : `${BACKEND}${previewUrls.after}`;
-                    setAfterUrl(afterFullUrl);
-                  }}
-                >
-                  Retry
-                </button>
-              </div>
             )}
           </div>
         </div>
@@ -443,9 +479,8 @@ export default function DiffModal({
           </button>
         </div>
 
-        <div className="diff-layout">
-          {renderFileList()}
-          
+        <div className={`diff-layout ${viewMode === 'preview' ? 'preview-mode' : ''}`}>
+          {viewMode === 'code' && renderFileList()}
           <div className="content-area">
             {viewMode === 'code' ? renderFileDiff() : renderPreview()}
           </div>

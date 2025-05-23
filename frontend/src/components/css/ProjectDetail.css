@@ -2,230 +2,319 @@
    Base & Utility Classes
    ============================== */
 
-   body {
-    margin: 0;
-    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-    background: #f4f4f9;
-    color: #333;
-  }
-  
-  .btn {
-    padding: 0.6rem 1.2rem;
-    border-radius: 4px;
-    font-size: 1rem;
-    border: none;
-    cursor: pointer;
-    transition: background 0.2s ease;
-  }
-  
-  .btn--primary {
-    background-color: #3d85c6;
-    color: #fff;
-  }
-  .btn--primary:hover:not(:disabled) {
-    background-color: #336ea8;
-  }
-  
-  .btn--secondary {
-    background-color: #e1e1e6;
-    color: #333;
-  }
-  .btn--secondary:hover {
-    background-color: #d1d1d6;
-  }
-  
-  .status {
-    text-align: center;
-    margin: 3rem 0;
-    font-size: 1.25rem;
-  }
-  .status--error {
-    color: #d9534f;
-  }
-  
-  /* ==============================
-     Project Detail Layout
-     ============================== */
-  
-  .project-detail {
-    max-width: 1200px;
-    margin: 0 auto;
-    padding: 2rem;
-  }
-  
-  .project-detail__header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 2rem;
-  }
-  .project-detail__title {
-    font-size: 2rem;
-    margin: 0;
-  }
-  
-  /* ==============================
-     Sections & Grids
-     ============================== */
-     .modal h2 {
-      color: #1f2a38 !important;
-  }
-  .section-title {
-    font-size: 1.5rem;
-    margin-bottom: 1rem;
-    color:#fff !important
-  }
-  
-  .project-detail__section {
-    margin-bottom: 2rem;
-  }
-  
-  .file-grid,
-  .apps-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-    gap: 1.5rem;
-  }
-  
-  /* ==============================
-     File Card
-     ============================== */
-  
-  .file-card {
-    background: #fff;
-    padding: 1rem;
-    border-radius: 8px;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
-    cursor: pointer;
-    transition: transform 0.2s ease, box-shadow 0.2s ease;
-  }
-  .file-card:hover {
-    transform: translateY(-4px);
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
-  }
-  .file-card__title {
-    margin: 0;
-    font-weight: 500;
-    color: #3d85c6;
-    font-size: 1rem;
-  }
-  
-  /* ==============================
-     File Nav Buttons
-     ============================== */
-  
-  .file-nav {
-    display: flex;
-    gap: 0.8rem;
-    margin-top: 1rem;
-  }
-  .file-nav button {
-    background: #e1e1e6;
-    padding: 0.5rem 1rem;
-    border-radius: 4px;
-  }
-  .file-nav button:hover {
-    background: #d1d1d6;
-  }
-  
-  /* ==============================
-     App Cards
-     ============================== */
-  
-  .app-card {
-    background: #fff;
-    padding: 1.2rem;
-    border-radius: 8px;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
-    display: flex;
-    flex-direction: column;
-    justify-content: space-between;
-    transition: transform 0.2s ease, box-shadow 0.2s ease;
-  }
-  .app-card:hover {
-    transform: translateY(-4px);
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
-  }
-  
-  .app-card__title {
-    margin: 0 0 1rem;
-    font-size: 1.2rem;
-    color: #333;
-  }
-  
-  .app-file-grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 0.8rem;
-    margin-bottom: 1rem;
-  }
-  
-  .app-card__manage-btn {
-    align-self: flex-start;
-  }
-  
-  /* Create‑New App Card */
-  .app-card--create {
-    border: 2px dashed #3d85c6;
-    background: #fff;
-    color: #3d85c6;
-    justify-content: center;
-    align-items: center;
-    cursor: pointer;
-  }
-  .app-card--create-inner {
-    text-align: center;
-  }
-  .app-card--create-icon {
-    font-size: 2rem;
-    display: block;
-    margin-bottom: 0.5rem;
-  }
-  
-  /* ==============================
-     Modal Styles
-     ============================== */
-  
-  .modal-overlay {
-    position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    background: rgba(0,0,0,0.5);
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    z-index: 1000;
-  }
-  
-  .modal {
-    background: #fff;
-    padding: 2rem;
-    border-radius: 8px;
-    width: 360px;
-    box-shadow: 0 4px 16px rgba(0,0,0,0.2);
-  }
-  
-  .modal h2 {
-    margin-top: 0;
-  }
-  
-  .modal__input,
-  .modal__textarea {
-    width: 100%;
-    padding: 0.8rem;
-    margin: 0.5rem 0 1rem;
-    border: 1px solid #ccc;
-    border-radius: 4px;
-    font-size: 1rem;
-  }
-  
-  .modal__textarea {
-    resize: vertical;
-    min-height: 80px;
-  }
-  /* ==============================
+body {
+  margin: 0;
+  font-family: 'Roboto', sans-serif;
+  background: #282c34;
+  color: #d4d4d4;
+}
+
+.btn {
+  padding: 0.75rem 1.5rem;
+  border-radius: 8px;
+  font-size: 1rem;
+  font-weight: 500;
+  border: none;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.btn--primary {
+  background-color: #3498db;
+  color: #fff;
+}
+
+.btn--primary:hover:not(:disabled) {
+  background-color: #2980b9;
+  transform: translateY(-1px);
+}
+
+.btn--primary:disabled {
+  background-color: #3498db;
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.btn--secondary {
+  background-color: #6c757d;
+  color: #fff;
+}
+
+.btn--secondary:hover {
+  background-color: #5a6268;
+}
+
+.status {
+  text-align: center;
+  margin: 3rem 0;
+  font-size: 1.25rem;
+  color: #d4d4d4;
+}
+
+.status--error {
+  color: #ff6b6b;
+}
+
+/* ==============================
+   Project Detail Layout
+   ============================== */
+
+.project-detail {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 2rem;
+}
+
+.project-detail__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 2.5rem;
+  padding-bottom: 1.5rem;
+  border-bottom: 1px solid #444;
+}
+
+.project-detail__title {
+  font-size: 2.25rem;
+  font-weight: 600;
+  margin: 0;
+  color: #fff;
+}
+
+.project-detail__actions {
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+}
+
+/* ==============================
+   Sections & Grids
+   ============================== */
+
+.section-title {
+  font-size: 1.5rem;
+  margin-bottom: 1.5rem;
+  color: #fff;
+  font-weight: 600;
+}
+
+.project-detail__section {
+  margin-bottom: 3rem;
+  padding: 2rem;
+  background: #1e1e1e;
+  border-radius: 12px;
+  border: 1px solid #444;
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3), 0 2px 4px -1px rgba(0, 0, 0, 0.2);
+}
+
+.file-grid,
+.apps-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 1.5rem;
+}
+
+/* ==============================
+   File Card
+   ============================== */
+
+.file-card {
+  background: #282c34;
+  padding: 1.25rem;
+  border-radius: 8px;
+  border: 1px solid #444;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+}
+
+.file-card:hover {
+  transform: translateY(-2px);
+  border-color: #3498db;
+  box-shadow: 0 4px 12px rgba(52, 152, 219, 0.3);
+}
+
+.file-card__title {
+  margin: 0;
+  font-weight: 500;
+  color: #3498db;
+  font-size: 1rem;
+}
+
+.file-card--template {
+  background: #3498db;
+  border: none;
+  box-shadow: 0 4px 12px rgba(52, 152, 219, 0.4);
+}
+
+.file-card--template .file-card__title {
+  color: #fff;
+  text-align: center;
+  font-weight: 600;
+}
+
+.file-card--template:hover {
+  background: #2980b9;
+  transform: translateY(-2px);
+}
+
+/* ==============================
+   File Nav Buttons
+   ============================== */
+
+.file-nav {
+  display: flex;
+  gap: 1rem;
+  margin-top: 1.5rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid #444;
+}
+
+.file-nav button {
+  background: #282c34;
+  color: #d4d4d4;
+  padding: 0.75rem 1.25rem;
+  border-radius: 8px;
+  border: 1px solid #444;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.file-nav button:hover {
+  background: #1e1e1e;
+  border-color: #3498db;
+  transform: translateY(-1px);
+}
+
+/* ==============================
+   App Cards
+   ============================== */
+
+.app-card {
+  background: #282c34;
+  padding: 1.5rem;
+  border-radius: 12px;
+  border: 1px solid #444;
+  display: flex;
+  flex-direction: column;
+  transition: all 0.2s ease;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+}
+
+.app-card:hover {
+  transform: translateY(-2px);
+  border-color: #3498db;
+  box-shadow: 0 4px 12px rgba(52, 152, 219, 0.3);
+}
+
+.app-card__title {
+  margin: 0 0 1.5rem;
+  font-size: 1.25rem;
+  color: #fff;
+  font-weight: 600;
+}
+
+.app-file-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+/* Create New App Card */
+.app-card--create {
+  border: 2px dashed #3498db;
+  background: #1e1e1e;
+  color: #3498db;
+  justify-content: center;
+  align-items: center;
+  cursor: pointer;
+  padding: 2rem;
+}
+
+.app-card--create:hover {
+  background: #282c34;
+  border-color: #2980b9;
+  color: #2980b9;
+}
+
+.app-card--create-inner {
+  text-align: center;
+}
+
+.app-card--create-icon {
+  font-size: 2.5rem;
+  display: block;
+  margin-bottom: 0.75rem;
+}
+
+/* ==============================
+   Modal Styles
+   ============================== */
+
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  z-index: 1000;
+  backdrop-filter: blur(4px);
+}
+
+.modal {
+  background: #1e1e1e;
+  padding: 2rem;
+  border-radius: 12px;
+  width: 400px;
+  border: 1px solid #444;
+  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.3), 0 10px 10px -5px rgba(0, 0, 0, 0.2);
+}
+
+.modal h2 {
+  margin-top: 0;
+  color: #fff;
+  font-size: 1.5rem;
+  margin-bottom: 1.5rem;
+}
+
+.modal__input,
+.modal__textarea {
+  width: 100%;
+  padding: 0.75rem;
+  margin: 0.5rem 0 1rem;
+  border: 1px solid #444;
+  border-radius: 8px;
+  font-size: 1rem;
+  background: #282c34;
+  color: #d4d4d4;
+}
+
+.modal__input:focus,
+.modal__textarea:focus {
+  outline: none;
+  border-color: #3498db;
+  box-shadow: 0 0 0 3px rgba(52, 152, 219, 0.2);
+}
+
+.modal__textarea {
+  resize: vertical;
+  min-height: 100px;
+}
+
+.modal__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 1rem;
+  margin-top: 2rem;
+}
+
+/* ==============================
    Refined App Cards & Grid
    ============================== */
 
@@ -237,10 +326,11 @@
 }
 
 .app-card {
-  background: #ffffff;
+  background: #282c34;
   padding: 1.5rem;
   border-radius: 12px;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
+  border: 1px solid #444;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
   display: flex;
   flex-direction: column;
   transition: transform 0.2s ease, box-shadow 0.2s ease;
@@ -250,17 +340,18 @@
 
 .app-card:hover {
   transform: translateY(-6px);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+  border-color: #3498db;
 }
 
 .app-card__title {
   margin: 0 0 1rem;
   font-size: 1.25rem;
   font-weight: 600;
-  color: #2a3f54;
+  color: #fff;
 }
 
-/* make the file-list inside each card scroll if it’s too long */
+/* make the file-list inside each card scroll if it's too long */
 .app-file-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
@@ -278,7 +369,7 @@
   bottom: 0;
   height: 2rem;
   pointer-events: none;
-  background: linear-gradient(rgba(255,255,255,0), #ffffff);
+  background: linear-gradient(rgba(40, 44, 52, 0), #282c34);
 }
 
 /* button at bottom stays visible */
@@ -292,24 +383,18 @@
    Color Palette & Typography
    ============================== */
 
-body {
-  background: #f0f4f8;
-  color: #333b47;
-  font-family: 'Inter', sans-serif;
-}
-
 .section-title {
-  font-family: 'Inter', sans-serif;
-  color: #1f2a38;
+  font-family: 'Roboto', sans-serif;
+  color: #fff;
   text-transform: uppercase;
   letter-spacing: 0.05em;
 }
 
 /* refine Create‐New App card */
 .app-card--create {
-  border: 2px dashed #619ad1;
-  background: #fafbfc;
-  color: #619ad1;
+  border: 2px dashed #3498db;
+  background: #1e1e1e;
+  color: #3498db;
   justify-content: center;
   align-items: center;
   padding: 2rem;
@@ -325,11 +410,28 @@ body {
    ============================== */
 
 @media (max-width: 768px) {
-  .apps-grid {
-    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  .project-detail {
+    padding: 1rem;
   }
-  .app-card {
-    max-height: none;
+  
+  .project-detail__header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 1rem;
+  }
+  
+  .file-grid,
+  .apps-grid {
+    grid-template-columns: 1fr;
+  }
+  
+  .file-nav {
+    flex-wrap: wrap;
+  }
+  
+  .modal {
+    width: 90%;
+    margin: 1rem;
   }
 }
 /* ----------------------------------
@@ -340,20 +442,22 @@ body {
 .app-file-grid .file-card {
   /* ensure the card itself can shrink */
   min-width: 0;
+  background: #282c34;
+  border: 1px solid #444;
 }
 
 /* Truncate the title line with ellipsis */
 .app-file-grid .file-card__title {
   white-space: nowrap;        /* keep it on one line */
   overflow: hidden;           /* clip the overflow */
-  text-overflow: ellipsis;    /* show “…” at the end */
+  text-overflow: ellipsis;    /* show "…" at the end */
   display: block;             /* ensure block formatting context */
   max-width: 100%;            /* never go beyond its container */
 }
 
-  .modal__actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: 1rem;
-  }
+.modal__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 1rem;
+}
   

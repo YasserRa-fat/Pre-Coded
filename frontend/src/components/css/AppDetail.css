@@ -1,26 +1,26 @@
 .file-card {
-    background: #fafafa; /* light gray instead of white */
-    padding: 0.75rem; /* smaller padding */
+    background: #282c34;
+    padding: 0.75rem;
     border-radius: 6px;
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
-    border: 1px solid #ddd;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+    border: 1px solid #444;
     cursor: pointer;
     transition: border-color 0.2s ease, box-shadow 0.2s ease;
-  }
+}
   
-  .file-card:hover {
-    border-color: #007bff; /* Bootstrap blue */
-    box-shadow: 0 2px 6px rgba(0, 123, 255, 0.15);
-  }
+.file-card:hover {
+    border-color: #3498db;
+    box-shadow: 0 2px 6px rgba(52, 152, 219, 0.15);
+}
   
-  .file-card h3 {
+.file-card h3 {
     margin: 0 0 0.4rem 0;
-    font-size: 1rem; /* smaller text */
-    color: #333;
-  }
+    font-size: 1rem;
+    color: #fff;
+}
   
-  .file-card p {
+.file-card p {
     font-size: 0.85rem;
-    color: #666;
-  }
+    color: #d4d4d4;
+}
   

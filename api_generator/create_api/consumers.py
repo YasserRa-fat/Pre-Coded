@@ -50,6 +50,7 @@ import aiofiles
 from typing import Optional, List
 from django.core.files.base import ContentFile
 import re
+from core.services.json_validator import JSONValidator
 
 # Handle different WebSocket libraries
 try:
@@ -1729,7 +1730,7 @@ class ProjectConsumer(AsyncWebsocketConsumer):
             return None
 
     async def _transform_data(self, data, processor):
-        """Transform data using AI-generated processor rules"""
+        """Transform data using dynamic rules"""
         try:
             transform_rules = processor.get('transform_rules', {})
             if not transform_rules:
@@ -1751,17 +1752,48 @@ class ProjectConsumer(AsyncWebsocketConsumer):
             return None
 
     async def _apply_transform(self, item, transform_rules):
-        """Apply transformation rules to a data item"""
+        """Apply transformation rules dynamically"""
         try:
             result = {}
+            
+            # Get field type information if available
+            field_types = {}
+            if hasattr(item, '_meta'):
+                for field in item._meta.fields:
+                    field_types[field.name] = field.get_internal_type()
+
             for field, rule in transform_rules.items():
-                if field in item:
-                    if rule.get('type') == 'date':
-                        result[field] = item[field].isoformat() if item[field] else None
-                    elif rule.get('type') == 'number':
-                        result[field] = float(item[field]) if item[field] is not None else 0
+                if field not in item:
+                    continue
+                    
+                value = item[field]
+                if value is None:
+                    result[field] = None
+                    continue
+
+                # Get rule type, falling back to inferring from field type
+                rule_type = rule.get('type')
+                if not rule_type and field in field_types:
+                    django_type = field_types[field]
+                    if 'Date' in django_type or 'Time' in django_type:
+                        rule_type = 'date'
+                    elif any(numeric in django_type for numeric in ['Integer', 'Float', 'Decimal']):
+                        rule_type = 'number'
+
+                # Apply transformation based on type
+                if rule_type == 'date':
+                    if hasattr(value, 'isoformat'):
+                        result[field] = value.isoformat()
                     else:
-                        result[field] = item[field]
+                        result[field] = str(value)
+                elif rule_type == 'number':
+                    try:
+                        result[field] = float(value)
+                    except (ValueError, TypeError):
+                        result[field] = 0
+                else:
+                    result[field] = value
+
             return result
         except Exception as e:
             logger.error(f"Error applying transform: {str(e)}")
@@ -1769,33 +1801,65 @@ class ProjectConsumer(AsyncWebsocketConsumer):
 
     @database_sync_to_async
     def _get_model_sample_data(self, model, limit=10):
-        """Get sample data for a model to provide context to AI"""
+        """Get sample data for a model dynamically"""
         try:
-            return list(model.objects.filter(
-                user=self.user,
-                created__gte=timezone.now() - timedelta(days=30)
-            ).order_by('-created')[:limit].values())
+            # Get model fields to determine what to filter by
+            fields = [f.name for f in model._meta.fields]
+            
+            # Build query filters dynamically
+            filters = {}
+            
+            # Add user filter if model has user field and we have a user
+            if 'user' in fields and self.user:
+                filters['user'] = self.user
+                
+            # Add date filter if model has relevant date fields
+            date_fields = [f for f in fields if f in ['created', 'created_at', 'date_created', 'modified', 'updated_at']]
+            if date_fields:
+                from django.utils import timezone
+                from datetime import timedelta
+                filters[f"{date_fields[0]}__gte"] = timezone.now() - timedelta(days=30)
+                order_by = f"-{date_fields[0]}"
+            else:
+                order_by = '-id'
+
+            # Get the data with dynamic filtering
+            queryset = model.objects.filter(**filters).order_by(order_by)[:limit]
+            
+            # Get all field values
+            return list(queryset.values())
+            
         except Exception as e:
             logger.error(f"Error getting sample data: {str(e)}")
             return []
 
     @database_sync_to_async
     def get_project_models(self):
-        """Get available models for project"""
+        """Get available models for project dynamically"""
         try:
             models = {}
-            app_label = f'project_{self.project_id}_posts'
+            project_apps = {}
             
-            # Try to get available models
-            try:
-                models['posts'] = apps.get_model(app_label, 'Post')
-            except LookupError:
-                logger.warning(f"Post model not found for {app_label}")
-                
-            try:
-                models['comments'] = apps.get_model(app_label, 'Comment')
-            except LookupError:
-                logger.warning(f"Comment model not found for {app_label}")
+            # Get all apps for the project from the default database
+            from create_api.models import App
+            project_apps = App.objects.using('default').filter(
+                project_id=self.project_id
+            ).values('id', 'name')
+
+            # For each app, try to get its models
+            for app in project_apps:
+                app_label = f'project_{self.project_id}_{app["name"]}'
+                try:
+                    # Get all models for this app
+                    app_models = apps.all_models.get(app_label, {})
+                    for model_name, model in app_models.items():
+                        # Store with a descriptive key based on app and model name
+                        key = f"{app['name']}_{model_name}".lower()
+                        models[key] = model
+                        logger.debug(f"Found model: {key} in app {app_label}")
+                except Exception as e:
+                    logger.warning(f"Error getting models for app {app_label}: {str(e)}")
+                    continue
                 
             return models
         except Exception as e:
@@ -1972,23 +2036,21 @@ class ProjectConsumer(AsyncWebsocketConsumer):
             logger.error(traceback.format_exc())
 
     async def process_ai_response(self, response):
-        """Process AI response and send changes to client with marker areas for backend implementation"""
+        """Process AI response and send changes to client with dynamic handling"""
         try:
             # Extract response data
             logger.debug(f"Processing AI response: {str(response)[:200]}...")
             
-            # Parse JSON if needed
-            try:
-                json_data = response if isinstance(response, dict) else json.loads(response)
-            except json.JSONDecodeError:
-                logger.error("Failed to parse AI response as JSON")
-                logger.error(f"Response: {response}")
-                await self.send_error_safe("Invalid response from AI")
+            # Use the improved JSON validator
+            is_valid, json_data, error = await JSONValidator.validate_and_parse(response)
+            
+            if not is_valid or not json_data:
+                logger.error(f"Invalid AI response: {error}")
+                await self.send_error_safe("Invalid response from AI service")
                 return
 
             if not isinstance(json_data, dict) or 'files' not in json_data:
                 logger.error("AI response does not contain 'files' key")
-                logger.error(f"Response: {response}")
                 await self.send_error_safe("Invalid response structure from AI")
                 return
 
@@ -2552,22 +2614,30 @@ class ProjectConsumer(AsyncWebsocketConsumer):
             logger.error(traceback.format_exc())
             return None
     async def update_view_content(self, current_content, diff_data):
-        """Update view content to support template changes - dynamic version"""
+        """Update view content to support template changes - fully dynamic version"""
         try:
             # Get project context for potential use in view updates
             project_context = await self.get_project_context(self.project_id)
             
-            # Don't modify content if no PostList class (wrong file)
-            if 'class PostList' not in current_content:
-                logger.debug("No PostList class found in content, skipping view update")
+            # Analyze the view content to find class definitions
+            import ast
+            try:
+                tree = ast.parse(current_content)
+                class_nodes = [node for node in ast.walk(tree) if isinstance(node, ast.ClassDef)]
+                
+                if not class_nodes:
+                    logger.debug("No class definitions found in view content")
                 return current_content
 
-            logger.info("Found PostList class, preparing to update view content")
+                # Find the main view class - typically the last class in the file
+                main_view_class = class_nodes[-1].name
+                logger.info(f"Found main view class: {main_view_class}")
+                
+            except SyntaxError:
+                logger.error("Failed to parse view content")
+                return current_content
             
             # Scan diff data to determine what needs to be added
-            has_analytics = False
-            has_charts = False
-            has_templates = False
             template_features = set()
             
             # Analyze all files to determine required features
@@ -2575,173 +2645,152 @@ class ProjectConsumer(AsyncWebsocketConsumer):
                 file_content = file_data.get('after', '')
                 metadata = file_data.get('file_metadata', {})
                 
-                # Check file content for features
-                if 'analytics' in file_path.lower() or 'analytics' in file_content.lower():
-                    has_analytics = True
-                    template_features.add('analytics')
-                
-                if 'chart' in file_path.lower() or 'chart' in file_content.lower():
-                    has_charts = True
-                    template_features.add('chart')
+                # Extract features from file content and path
+                features = self._extract_features_from_content(file_path, file_content)
+                template_features.update(features)
                 
                 if metadata.get('is_template', False):
-                    has_templates = True
-                    
-                    # Analyze template content to determine features
-                    if '{% include' in file_content:
-                        template_features.add('includes')
-                    if 'analytics' in file_content.lower():
-                        template_features.add('analytics')
-                    if 'chart' in file_content.lower():
-                        template_features.add('chart')
-                    if 'comment' in file_content.lower():
-                        template_features.add('comments')
+                    # Analyze template content for additional features
+                    template_features.update(self._analyze_template_features(file_content))
             
             logger.debug(f"Detected template features: {template_features}")
             
-            # Required imports based on features
-            needed_imports = set()
-            
-            if 'analytics' in template_features or 'chart' in template_features:
-                needed_imports.update([
-                    'from django.utils import timezone',
-                    'from django.db.models import Count',
-                    'from django.db.models.functions import TruncDate',
-                    'from datetime import timedelta',
-                    'import json'
-                ])
-            
-            if 'comments' in template_features:
-                needed_imports.add('from django.db.models import Count')
-            
-            # Add imports if they don't exist already
-            new_content = current_content
-            for imp in needed_imports:
-                if imp not in new_content:
-                    logger.debug(f"Adding import: {imp}")
-                    # Find the right place to add the import
-                    import_end = 0
-                    for line in new_content.split('\n'):
-                        if line.startswith('import ') or line.startswith('from '):
-                            import_end = new_content.find(line) + len(line)
-                    
-                    # Add after last import or at the beginning
-                    if import_end > 0:
-                        new_content = new_content[:import_end] + '\n' + imp + new_content[import_end:]
-                    else:
-                        new_content = imp + '\n' + new_content
-
-            # Check for features that require context data
-            need_context_data = False
-            required_features = []
-            
-            # Identify what features need context data
-            for feature in template_features:
-                if feature in ['analytics', 'chart', 'graph', 'dashboard', 'visualization', 'stats']:
-                    need_context_data = True
-                    required_features.append(feature)
-            
-            if need_context_data:
-                logger.info(f"Adding context data support for features: {required_features}")
-                
-                # Generate context data method dynamically based on required features
-                # This is just a skeleton that will be filled with AI-generated content
-                feature_prompts = {
-                    "analytics": "Add code to collect analytics data",
-                    "chart": "Add code to prepare chart data",
-                    "graph": "Add code to prepare graph data",
-                    "dashboard": "Add code to prepare dashboard metrics"
-                }
-                
-                # Build prompt for context data generation
-                context_prompt = "\n".join([feature_prompts.get(feature, f"Support {feature}") 
-                                         for feature in required_features])
-                
-                # Let the template be generated by the AI based on the specific features needed
-                analytics_context = """
-    def get_context_data(self, **kwargs):
-        context = super().get_context_data(**kwargs)
-        if self.request.user.is_authenticated:
-                            # Dynamic context data based on required features
-            # Get logger reference from module if not defined in function scope
-            log_ref = logging.getLogger(__name__) if 'logger' not in locals() else logger
-            log_ref.debug(f"Preparing context data for features: {required_features}")
-            
-            # Common data preparation code
-            end_date = timezone.now()
-            start_date = end_date - timedelta(days=10)
-            
-            # Get data based on requested features
-            data_objects = {}
-            feature_data = {}
-            
-            # Add data for appropriate models based on the view's purpose
-            try:
-                # This section is intentionally generic and will be replaced by the AI
-                # with specific model queries based on the template's needs
-                pass
-            except Exception as e:
-                logger.error(f"Error preparing feature data: {str(e)}")
-            
-            # Add all needed data to context
-            context.update(feature_data)
-            
-            # DEBUG: Log data being added to context
-            logger.debug(f"Added context data for {len(feature_data)} features")
-        
-        return context"""
-
-                # Replace or add get_context_data method
-                if 'def get_context_data' in new_content:
-                    # Find the method and replace it
-                    start = new_content.find('def get_context_data')
-                    # Find the end of the function - looking for return and the end of the line after it
-                    end_pos = new_content.find('return context', start)
-                    if end_pos != -1:
-                        # Find the end of the line containing 'return context'
-                        line_end = new_content.find('\n', end_pos)
-                        if line_end != -1:
-                            end = line_end
-                        else:
-                            end = len(new_content)
-                    
-                    logger.debug(f"Replacing get_context_data method from position {start} to {end}")
-                    new_content = new_content[:start] + analytics_context + new_content[end:]
-                else:
-                    # Add the method to the PostList class
-                    class_start = new_content.find('class PostList')
-                    
-                    # Find a good place to insert the method
-                    insert_pos = -1
-                    
-                    # Look for existing methods in the class
-                    method_pos = new_content.find('\n    def ', class_start)
-                    if method_pos != -1:
-                        # Insert before the next method after the class definition
-                        lines = new_content[class_start:method_pos].split('\n')
-                        if len(lines) > 1:  # Make sure we have the class definition line plus at least one more
-                            # Find where the class attributes/properties end
-                            for i, line in enumerate(lines[1:], 1):
-                                if not line.strip() or not line.startswith('    ') or line.startswith('    def '):
-                                    insert_pos = class_start + sum(len(l) + 1 for l in lines[:i])
-                                    break
-                    
-                    if insert_pos == -1:
-                        # If we couldn't find a good position, just add it after the class declaration
-                        class_line_end = new_content.find('\n', class_start)
-                        if class_line_end != -1:
-                            insert_pos = class_line_end + 1
-                        else:
-                            insert_pos = len(new_content)
-                    
-                    logger.debug(f"Adding get_context_data method at position {insert_pos}")
-                    new_content = new_content[:insert_pos] + analytics_context + new_content[insert_pos:]
-
-            return new_content
+            # Let the AI service handle the actual code generation
+            # This ensures no hardcoded assumptions about imports or context data
+            return await self._generate_view_content(
+                current_content=current_content,
+                template_features=template_features,
+                project_context=project_context,
+                main_class_name=main_view_class
+            )
 
         except Exception as e:
             logger.error(f"Error updating view content: {str(e)}")
             logger.error(traceback.format_exc())
+            return current_content
+
+    def _extract_features_from_content(self, file_path: str, content: str) -> set:
+        """Extract features from file content without hardcoding"""
+        features = set()
+        
+        # Use regex to find Django template tags and features
+        import re
+        
+        # Look for common Django patterns
+        patterns = {
+            'analytics': r'analytics|stats|metrics|tracking',
+            'chart': r'chart|graph|plot|visualization',
+            'form': r'{%\s*form|FormView|ModelForm',
+            'list': r'ListView|{%\s*for\b',
+            'detail': r'DetailView|get_object',
+            'create': r'CreateView|form_valid',
+            'update': r'UpdateView|form_valid',
+            'delete': r'DeleteView|delete',
+            'user': r'user\.|request\.user|login|auth',
+            'api': r'api|JsonResponse|REST|endpoint',
+            'static': r'{%\s*static|staticfiles|css|js',
+            'media': r'media|upload|file|image',
+            'search': r'search|query|filter',
+            'pagination': r'page|paginate|Paginator',
+            'comments': r'comment|discussion|reply',
+            'notification': r'notification|alert|message'
+                }
+                
+        # Check both file path and content
+        text_to_check = f"{file_path.lower()} {content.lower()}"
+        
+        for feature, pattern in patterns.items():
+            if re.search(pattern, text_to_check, re.I):
+                features.add(feature)
+                
+        return features
+
+    def _analyze_template_features(self, content: str) -> set:
+        """Analyze template content for features without hardcoding"""
+        features = set()
+        
+        # Look for template-specific patterns
+        patterns = {
+            'includes': r'{%\s*include',
+            'extends': r'{%\s*extends',
+            'blocks': r'{%\s*block',
+            'forms': r'{%\s*csrf_token|<form',
+            'static': r'{%\s*static|{%\s*load\s+static',
+            'conditions': r'{%\s*if|{%\s*else',
+            'loops': r'{%\s*for|{%\s*while',
+            'filters': r'{{\s*.*\|\w+}}',
+            'urls': r'{%\s*url|href=',
+            'media': r'src=|media/',
+            'messages': r'{%\s*if\s+messages|{{\s*message'
+        }
+        
+        for feature, pattern in patterns.items():
+            if re.search(pattern, content):
+                features.add(feature)
+                
+        return features
+
+    async def _generate_view_content(self, current_content: str, template_features: set, 
+                                   project_context: dict, main_class_name: str) -> str:
+        """Generate view content using AI service"""
+        try:
+            # Prepare the request for the AI service
+            request_data = {
+                'current_content': current_content,
+                'features': list(template_features),
+                'project_context': project_context,
+                'main_class_name': main_class_name,
+                'request_type': 'view_update'
+            }
+            
+            # Call AI service to generate the view content
+            response = await call_ai_multi_file(
+                self.conversation,
+                json.dumps(request_data),
+                {'type': 'view_update', 'data': request_data}
+            )
+            
+            if response and isinstance(response, dict):
+                try:
+                    # Extract the updated view content from the response
+                    files = response.get('files', {})
+                    
+                    # Process each file to handle escaping properly
+                    for file_path, content in files.items():
+                        if file_path.endswith('views.py'):
+                            # Handle potential string escaping issues
+                            if isinstance(content, str):
+                                # Remove any raw string markers
+                                content = content.replace('r"""', '"""').replace("r'''", "'''")
+                    
+                                # Fix any double-escaped newlines
+                                content = content.replace('\\\\n', '\\n')
+                                
+                                # Unescape any escaped quotes
+                                content = content.replace("\\'", "'").replace('\\"', '"')
+                                
+                                # Handle any remaining invalid escapes
+                                try:
+                                    # Try to interpret as string literal
+                                    content = ast.literal_eval(f"'''{content}'''")
+                                except (SyntaxError, ValueError):
+                                    # If that fails, just use the content as is
+                                    pass
+                                    
+                            return content
+                    
+                    logger.warning("No views.py file found in AI response")
+                    return current_content
+                    
+                except Exception as e:
+                    logger.error(f"Error processing AI response content: {str(e)}")
+                    return current_content
+            
+            logger.warning("AI service did not return valid view content")
+            return current_content
+
+        except Exception as e:
+            logger.error(f"Error generating view content: {str(e)}")
             return current_content
 
     def _analyze_request_context(self, request_text):
@@ -2791,4 +2840,3 @@ class ProjectConsumer(AsyncWebsocketConsumer):
         except Exception as e:
             logger.error(f"Error analyzing request context: {str(e)}")
             return {}
-

@@ -257,7 +257,7 @@ Return the complete, valid file content with proper structure."""
             return text
 
     @classmethod
-    async def validate_and_parse(cls, text: str) -> tuple[bool, dict, str]:
+    async def validate_and_parse(cls, text: str | dict) -> tuple[bool, dict, str]:
         """
         Validate and parse AI response with comprehensive error checking and detailed reporting.
         Returns tuple of (is_valid: bool, data: Optional[dict], error_message: Optional[str])
@@ -267,6 +267,27 @@ Return the complete, valid file content with proper structure."""
             
         try:
             logger.debug("=== Starting Comprehensive JSON Validation ===")
+            
+            # If input is already a dictionary, validate its structure
+            if isinstance(text, dict):
+                logger.debug("Input is already a dictionary, validating structure")
+                if 'files' not in text:
+                    return False, None, "Missing 'files' key in dictionary"
+                    
+                # Process file contents if present
+                if isinstance(text['files'], dict):
+                    for file_path, content in text['files'].items():
+                        if isinstance(content, str):
+                            # Skip placeholder content
+                            if cls._is_placeholder_content(content):
+                                logger.debug(f"Skipping placeholder content for {file_path}")
+                                continue
+                            # Handle code content
+                            text['files'][file_path] = cls._handle_code_content(content)
+                
+                return True, text, None
+                
+            # If input is string, proceed with normal validation
             logger.debug(f"Input text length: {len(text)}")
             
             # Phase 1: Pre-processing and initial cleaning
@@ -283,9 +304,19 @@ Return the complete, valid file content with proper structure."""
                         if isinstance(content, str):
                             # Skip placeholder content
                             if cls._is_placeholder_content(content):
+                                logger.debug(f"Skipping placeholder content for {file_path}")
                                 continue
                             # Handle code content
                             data['files'][file_path] = cls._handle_code_content(content)
+                
+                # Ensure required structure
+                if isinstance(data, dict):
+                    if 'files' not in data:
+                        data['files'] = {}
+                    if 'description' not in data:
+                        data['description'] = "Generated from AI response"
+                    if 'dependencies' not in data:
+                        data['dependencies'] = {"python": [], "js": []}
                 
                 return True, data, None
                 
@@ -475,12 +506,18 @@ Return the complete, valid file content with proper structure."""
         patterns = [
             r'^\.{3,}$',  # Just dots
             r'^\.{3,}.*\.{3,}$',  # Dots with text in between
+            r'^\.{3,}.*$',  # Dots at start with text
+            r'^.*\.{3,}$',  # Text with dots at end
             r'^\s*<placeholder>.*</placeholder>\s*$',
             r'^\s*TODO:.*$',
             r'^\s*IMPLEMENT:.*$',
             r'^\s*#\s*\.{3,}\s*$',  # Python comment with dots
             r'^\s*//\s*\.{3,}\s*$',  # JS comment with dots
-            r'^\s*/\*\s*\.{3,}\s*\*/\s*$'  # CSS comment with dots
+            r'^\s*/\*\s*\.{3,}\s*\*/\s*$',  # CSS comment with dots
+            r'^\s*complete\s+file\s+content\s+with\s+your\s+changes\s*$',  # Common AI placeholder
+            r'^\s*existing\s+code\s*$',  # Common code placeholder
+            r'^\s*content\s*$',  # Simple content placeholder
+            r'^\s*your\s+changes\s*$'  # Changes placeholder
         ]
         
         # Check if content matches any placeholder pattern
@@ -522,11 +559,16 @@ Return the complete, valid file content with proper structure."""
         return clean_path
 
     @classmethod
-    def preprocess_json(cls, text: str) -> str:
+    def preprocess_json(cls, text: str | dict) -> str | dict:
         """Preprocess JSON with enhanced code content handling"""
         logger.debug("=== Starting JSON Preprocessing ===")
         
         try:
+            # If input is already a dictionary, return it as is
+            if isinstance(text, dict):
+                logger.debug("Input is already a dictionary, skipping preprocessing")
+                return text
+                
             # Remove markdown code block markers
             text = text.replace('```json\n', '').replace('```', '')
             
@@ -544,19 +586,25 @@ Return the complete, valid file content with proper structure."""
             placeholders = {}
             placeholder_count = 0
             
-            def save_placeholder(match):
-                nonlocal placeholder_count
-                content = match.group(0)
-                if content in cls.PLACEHOLDER_PATTERNS:
-                    key = f"__PLACEHOLDER_{placeholder_count}__"
-                    placeholders[key] = content
-                    placeholder_count += 1
-                    return f'"{key}"'
-                return content
-            
-            # Save placeholders
+            # Save placeholders using regex pattern matching
             for pattern in cls.PLACEHOLDER_PATTERNS:
-                text = text.replace(f'"{pattern}"', save_placeholder(pattern))
+                # Escape special regex characters in the pattern
+                escaped_pattern = re.escape(pattern)
+                # Create a regex pattern that matches the placeholder with optional quotes and ellipsis
+                regex_pattern = f'(?:"({escaped_pattern})")|(?:({escaped_pattern}))|(?:"([^"]*?{escaped_pattern}[^"]*?)")|(?:([^"]*?{escaped_pattern}[^"]*?))'
+                
+                def save_placeholder(match):
+                    nonlocal placeholder_count
+                    # Get the matched content from any of the groups
+                    content = next((g for g in match.groups() if g is not None), None)
+                    if content:
+                        key = f"__PLACEHOLDER_{placeholder_count}__"
+                        placeholders[key] = content
+                        placeholder_count += 1
+                        return f'"{key}"'
+                    return match.group(0)
+                
+                text = re.sub(regex_pattern, save_placeholder, text)
             
             # Second pass: Extract code content
             code_blocks = {}
@@ -565,8 +613,8 @@ Return the complete, valid file content with proper structure."""
             def save_code_block(match):
                 nonlocal code_block_count
                 content = match.group(1)
-                # Skip if it's a placeholder
-                if any(p in content for p in cls.PLACEHOLDER_PATTERNS):
+                # Skip if it's a placeholder or contains a placeholder
+                if any(p in content for p in cls.PLACEHOLDER_PATTERNS) or any(p in content for p in placeholders.values()):
                     return f'"{content}"'
                 placeholder = f"__CODE_BLOCK_{code_block_count}__"
                 code_blocks[placeholder] = content
@@ -581,6 +629,9 @@ Return the complete, valid file content with proper structure."""
             
             # Process each code block
             for placeholder, content in code_blocks.items():
+                # Skip if it contains a placeholder
+                if any(p in content for p in placeholders.values()):
+                    continue
                 # Properly escape newlines
                 content = content.replace('\n', '\\n')
                 # Escape quotes
@@ -593,7 +644,9 @@ Return the complete, valid file content with proper structure."""
             
             # Restore placeholders
             for key, content in placeholders.items():
-                text = text.replace(f'"{key}"', f'"{content}"')
+                # Ensure proper escaping for placeholders
+                escaped_content = content.replace('"', '\\"').replace('\n', '\\n')
+                text = text.replace(f'"{key}"', f'"{escaped_content}"')
             
             # Final cleanup
             text = text.strip()
@@ -658,21 +711,49 @@ Return the complete, valid file content with proper structure."""
         return content
 
     @staticmethod
-    def _debug_json_error(text: str, error: json.JSONDecodeError):
-        """Debug helper for JSON errors"""
-        logger.error("=== JSON Error Analysis ===")
-        logger.error("Error type: %s", type(error))
-        logger.error("Error message: %s", str(error))
-        logger.error("Position: line %d, column %d, char %d", error.lineno, error.colno, error.pos)
-        
-        # Show context around error
-        lines = text.split('\n')
-        if error.lineno <= len(lines):
-            start = max(0, error.lineno - 2)
-            end = min(len(lines), error.lineno + 2)
-            context = '\n'.join("%d: %s" % (i+1, line) for i, line in enumerate(lines[start:end], start + 1))
-            logger.error("Context around error:\n%s", context)
-            logger.error("Error position: %s^", ' ' * (error.colno - 1))
+    def _debug_json_error(text: str | dict, error: Optional[json.JSONDecodeError] = None):
+        """Debug helper for JSON content analysis"""
+        logger.debug("\n=== JSON Content Analysis ===")
+        try:
+            # If input is a dictionary, convert to string for analysis
+            if isinstance(text, dict):
+                try:
+                    text = json.dumps(text)
+                except Exception as e:
+                    logger.error(f"Error converting dictionary to string: {str(e)}")
+                    return
+            
+            # Check for common JSON issues
+            issues = []
+            if text.count('{') != text.count('}'):
+                left_count = text.count('{')
+                right_count = text.count('}')
+                issues.append("Mismatched curly braces: left_count=%d, right_count=%d" % (left_count, right_count))
+            if text.count('"') % 2 != 0:
+                issues.append("Odd number of double quotes: %d" % text.count('"'))
+            if '\\' in text and not '\\"' in text:
+                issues.append("Contains unescaped backslashes")
+            if text.strip().startswith('```') or text.strip().endswith('```'):
+                issues.append("Contains markdown code blocks")
+                
+            if issues:
+                logger.debug("Found potential JSON issues:")
+                for issue in issues:
+                    logger.debug("- %s", issue)
+                    
+            if error:
+                logger.debug("\nJSON Error Details:")
+                logger.debug("Error type: %s", type(error))
+                logger.debug("Error message: %s", str(error))
+                if hasattr(error, 'pos'):
+                    context_start = max(0, error.pos - 50)
+                    context_end = min(len(text), error.pos + 50)
+                    logger.debug("Error context (±50 chars):\n%s", text[context_start:context_end])
+                    logger.debug("Error position: %d", error.pos)
+                    logger.debug("Character at error: %s", repr(text[error.pos]) if error.pos < len(text) else 'EOF')
+                    
+        except Exception as e:
+            logger.error("Error in _debug_json_content: %s", str(e))
 
     @staticmethod
     def _debug_feature_detection(content: str, patterns: List[str]):
@@ -785,43 +866,6 @@ Return the complete, valid file content with proper structure."""
         logger.debug("Contains quotes: ' (%d) \" (%d)", text.count("'"), text.count('"'))
         logger.debug("Contains backticks: ` (%d)", text.count('`'))
         logger.debug("Contains newlines: \\n (%d) actual newlines (%d)", text.count('\\n'), text.count(chr(10)))
-
-    @staticmethod
-    def _debug_json_content(text: str, error: Optional[json.JSONDecodeError] = None):
-        """Debug helper for JSON content analysis"""
-        logger.debug("\n=== JSON Content Analysis ===")
-        try:
-            # Check for common JSON issues
-            issues = []
-            if text.count('{') != text.count('}'):
-                left_count = text.count('{')
-                right_count = text.count('}')
-                issues.append("Mismatched curly braces: left_count=%d, right_count=%d" % (left_count, right_count))
-            if text.count('"') % 2 != 0:
-                issues.append("Odd number of double quotes: %d" % text.count('"'))
-            if '\\' in text and not '\\"' in text:
-                issues.append("Contains unescaped backslashes")
-            if text.strip().startswith('```') or text.strip().endswith('```'):
-                issues.append("Contains markdown code blocks")
-                
-            if issues:
-                logger.debug("Found potential JSON issues:")
-                for issue in issues:
-                    logger.debug("- %s", issue)
-                    
-            if error:
-                logger.debug("\nJSON Error Details:")
-                logger.debug("Error type: %s", type(error))
-                logger.debug("Error message: %s", str(error))
-                if hasattr(error, 'pos'):
-                    context_start = max(0, error.pos - 50)
-                    context_end = min(len(text), error.pos + 50)
-                    logger.debug("Error context (±50 chars):\n%s", text[context_start:context_end])
-                    logger.debug("Error position: %d", error.pos)
-                    logger.debug("Character at error: %s", repr(text[error.pos]) if error.pos < len(text) else 'EOF')
-                    
-        except Exception as e:
-            logger.error("Error in _debug_json_content: %s", str(e))
 
     @staticmethod
     def _debug_validation_error(text: str, error: Optional[json.JSONDecodeError] = None):

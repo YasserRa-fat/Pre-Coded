@@ -984,28 +984,21 @@ def sanitize_json_response(text: str) -> str:
         if json_start >= 0 and json_end > json_start:
             text = text[json_start:json_end]
             
-            # Remove any trailing content after the JSON
-            if text.count('{') == text.count('}'):
-                text = text.strip()
-            else:
-                # If braces don't match, try to find the proper ending
-                stack = []
-                for i, char in enumerate(text):
-                    if char == '{':
-                        stack.append(i)
-                    elif char == '}':
-                        if stack:
-                            stack.pop()
-                            if not stack:  # All braces matched
-                                text = text[:i+1]
-                                break
+        # Handle JavaScript code specially
+        def escape_js_code(match):
+            js_code = match.group(1)
+            # Properly escape JavaScript code
+            js_code = js_code.replace('\\', '\\\\')
+            js_code = js_code.replace('\n', '\\n')
+            js_code = js_code.replace('\r', '\\r')
+            js_code = js_code.replace('"', '\\"')
+            js_code = js_code.replace("'", "\\'")
+            return f'"{js_code}"'
+            
+        # Find and escape JavaScript code blocks
+        text = re.sub(r'"static/js/[^"]+\.js":\s*"([^"]+)"', escape_js_code, text)
         
-        # Handle ellipsis and placeholder content
-        text = re.sub(r'"\s*\.\.\.\s*"', '""', text)  # "..." -> ""
-        text = re.sub(r'"\s*\.{3}.*?\.{3}\s*"', '""', text)  # "...content..." -> ""
-        text = re.sub(r'"<.*?>"', '""', text)  # "<placeholder>" -> ""
-        
-        # Temporarily replace Django template tags to prevent escaping
+        # Handle template tags
         template_tags = []
         def save_template_tag(match):
             tag = match.group(0)
@@ -1029,12 +1022,23 @@ def sanitize_json_response(text: str) -> str:
         # Try to parse the JSON
         try:
             data = json.loads(text)
-            # Remove any empty or placeholder file contents
-            if isinstance(data, dict) and 'files' in data:
-                data['files'] = {
-                    k: v for k, v in data['files'].items() 
-                    if v and not v.isspace() and v != '...' and not v.startswith('...')
-                }
+            # Clean up file paths while preserving placeholders
+            cleaned_files = {}
+            for file_path, content in data.get('files', {}).items():
+                # Skip empty content but preserve placeholders
+                if not content or (content.isspace() and not JSONValidator._is_placeholder_content(content)):
+                    continue
+                    
+                # Normalize path
+                norm_path = normalize_path(file_path)
+                
+                # For templates, ensure we use just the filename
+                if norm_path.endswith('.html'):
+                    norm_path = os.path.basename(norm_path)
+                
+                cleaned_files[norm_path] = content
+            
+            data['files'] = cleaned_files
             return json.dumps(data, indent=2)
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse JSON: {str(e)}")
@@ -1123,20 +1127,32 @@ async def validate_json_with_ai(json_text: str) -> Optional[str]:
         logger.error(f"Error in validate_json_with_ai: {str(e)}")
         return None
 
-async def sanitize_ai_response(response_text: str, detect_analytics=False, request_text=None) -> str:
+async def sanitize_ai_response(response_text: str | dict, detect_analytics=False, request_text=None, project_context=None) -> str | dict:
     """
     Sanitize AI response to ensure valid JSON for parsing.
     Preserves all paths and template tags exactly as provided.
     """
     if not response_text:
         logger.error("Empty response received in sanitize_ai_response")
-        return json.dumps({
+        return {
             "files": {},
             "description": "Empty response",
             "dependencies": {"python": [], "js": []}
-        })
+        }
 
-    logger.debug(f"Input first 200 chars: {response_text[:200]}")
+    logger.debug(f"Input type: {type(response_text)}")
+    if isinstance(response_text, dict):
+        logger.debug("Input is already a dictionary")
+        # Ensure the dictionary has the required structure
+        if 'files' not in response_text:
+            response_text['files'] = {}
+        if 'description' not in response_text:
+            response_text['description'] = "Generated from AI response"
+        if 'dependencies' not in response_text:
+            response_text['dependencies'] = {"python": [], "js": []}
+        return response_text
+    else:
+        logger.debug(f"Input first 200 chars: {response_text[:200] if isinstance(response_text, str) else str(response_text)[:200]}")
     
     try:
         # Use the improved JSONValidator
@@ -1150,67 +1166,23 @@ async def sanitize_ai_response(response_text: str, detect_analytics=False, reque
                 data['dependencies'] = {"python": [], "js": []}
             if 'files' not in data:
                 data['files'] = {}
-            
-            # Handle analytics-specific requirements
-            if detect_analytics:
-                # Ensure Chart.js dependency
-                if 'js' not in data['dependencies']:
-                    data['dependencies']['js'] = []
-                if 'chart.js' not in data['dependencies']['js']:
-                    data['dependencies']['js'].append('chart.js')
                 
-                # Validate analytics-related files
-                for file_path, content in list(data['files'].items()):
-                    if file_path.endswith('.js') and 'chart' in file_path.lower():
-                        if not JSONValidator._is_placeholder_content(content) and not any(pattern in content for pattern in [
-                            'new Chart(',
-                            'Chart.defaults',
-                            'Chart.register',
-                            'createChart'
-                        ]):
-                            logger.warning(f"Analytics JS file {file_path} missing Chart.js initialization")
-                    elif file_path.endswith('.html'):
-                        if not JSONValidator._is_placeholder_content(content) and not any(pattern in content for pattern in [
-                            '<canvas',
-                            'chart-container',
-                            'data-chart'
-                        ]):
-                            logger.warning(f"Analytics template {file_path} missing chart elements")
-            
-            # Clean up file paths while preserving placeholders
-            cleaned_files = {}
-            for file_path, content in data['files'].items():
-                # Skip empty content but preserve placeholders
-                if not content or (content.isspace() and not JSONValidator._is_placeholder_content(content)):
-                    continue
-                    
-                # Normalize path
-                norm_path = normalize_path(file_path)
-                
-                # For templates, ensure we use just the filename
-                if norm_path.endswith('.html'):
-                    norm_path = os.path.basename(norm_path)
-                
-                cleaned_files[norm_path] = content
-            
-            data['files'] = cleaned_files
-            
-            return json.dumps(data, indent=2)
+            return data
         else:
-            logger.error(f"Failed to validate JSON: {error}")
-            return json.dumps({
+            logger.error(f"JSON validation failed: {error}")
+            return {
                 "files": {},
-                "description": f"Failed to parse response: {error}",
+                "description": "Failed to validate response",
                 "dependencies": {"python": [], "js": []}
-            })
+            }
             
     except Exception as e:
         logger.error(f"Error in sanitize_ai_response: {str(e)}")
-        return json.dumps({
+        return {
             "files": {},
             "description": f"Error processing response: {str(e)}",
             "dependencies": {"python": [], "js": []}
-        })
+        }
 
 async def call_ai_multi_file(conversation, text, files_data):
     """Call AI service for multiple file changes with validation and refinement."""
@@ -1255,15 +1227,35 @@ async def call_ai_multi_file(conversation, text, files_data):
             return None
             
         # Debug the initial response
-        logger.debug(f"Raw initial response: {initial_response[:500]}...")
+        if isinstance(initial_response, str):
+            logger.debug(f"Raw initial response:\n{initial_response}")
+        else:
+            logger.debug(f"Raw initial response type: {type(initial_response)}")
         
         # Sanitize the response before parsing
-        sanitized_response = await sanitize_ai_response(initial_response, detect_analytics=is_analytics_feature, request_text=text)
-        logger.debug(f"Sanitized AI response: {sanitized_response[:500]}...")
+        sanitized_response = await sanitize_ai_response(initial_response, detect_analytics=is_analytics_feature, request_text=text, project_context=project_context)
+        
+        # Debug sanitized response based on type
+        if isinstance(sanitized_response, dict):
+            logger.debug("Sanitized response is a dictionary")
+            logger.debug(f"Keys: {list(sanitized_response.keys())}")
+        elif isinstance(sanitized_response, str):
+            logger.debug("Sanitized response is a string")
+            logger.debug(f"Length: {len(sanitized_response)}")
+        else:
+            logger.debug(f"Sanitized response type: {type(sanitized_response)}")
         
         # Parse the response
         try:
-            changes = json.loads(sanitized_response)
+            # Handle different response types
+            if isinstance(sanitized_response, dict):
+                changes = sanitized_response
+            elif isinstance(sanitized_response, str):
+                changes = json.loads(sanitized_response)
+            else:
+                logger.error(f"Invalid response type: {type(sanitized_response)}")
+                return None
+                
             if not isinstance(changes, dict):
                 logger.error(f"Invalid response format - not a dict: {type(changes)}")
                 return None
@@ -1277,6 +1269,8 @@ async def call_ai_multi_file(conversation, text, files_data):
             
             # Get existing files from project context
             existing_files = set()
+            template_files = {}  # Keep track of template paths and their variations
+            
             if 'views' in project_context:
                 logger.debug("=== Views in Project Context ===")
                 for view in project_context['views']:
@@ -1285,7 +1279,20 @@ async def call_ai_multi_file(conversation, text, files_data):
                     existing_files.add(view_path)
             
             if 'templates' in project_context:
-                existing_files.update(t['name'] for t in project_context['templates'])
+                logger.debug("=== Templates in Project Context ===")
+                for template in project_context['templates']:
+                    template_path = template.get('path', '')
+                    logger.debug(f"Template path from context: {template_path}")
+                    # Store both the full path and just the filename
+                    existing_files.add(template_path)
+                    template_files[template_path] = template_path
+                    template_files[os.path.basename(template_path)] = template_path
+                    # Also add any app-specific template paths
+                    if template.get('is_app_template') and template.get('app_name'):
+                        app_path = f"{template['app_name']}/{template_path}"
+                        logger.debug(f"Adding app template path: {app_path}")
+                        existing_files.add(app_path)
+                        template_files[app_path] = template_path
             
             # Debug existing files
             logger.debug("=== All Existing Files ===")
@@ -1300,9 +1307,23 @@ async def call_ai_multi_file(conversation, text, files_data):
                 logger.debug(f"=== File Path Normalization for {file_path} ===")
                 logger.debug(f"Original path: {file_path}")
                 
-                # Normalize path but preserve app prefix
-                norm_path = normalize_template_path(file_path)
-                logger.debug(f"After template normalization: {norm_path}")
+                # Special handling for templates
+                if file_path.endswith('.html'):
+                    # Try to find the actual template path
+                    template_key = file_path
+                    if template_key not in template_files:
+                        # Try with just the filename
+                        template_key = os.path.basename(file_path)
+                    
+                    if template_key in template_files:
+                        norm_path = template_files[template_key]
+                        logger.debug(f"Found template path: {norm_path} for {file_path}")
+                    else:
+                        norm_path = normalize_template_path(file_path, project_context or {})
+                        logger.debug(f"Normalized template path: {norm_path}")
+                else:
+                    norm_path = normalize_path(file_path)
+                    logger.debug(f"After path normalization: {norm_path}")
                 
                 # Additional normalization for views
                 if file_path.endswith('views.py'):
@@ -1340,10 +1361,10 @@ async def call_ai_multi_file(conversation, text, files_data):
                     continue
                 
                 # Process the file
-                response['files'][file_path] = content
+                response['files'][norm_path] = content
                 response['metadata']['files_processed'] += 1
-                response['selected_files'].append(file_path)
-                logger.info(f"{'Adding new' if is_new_static else 'Processing existing'} file: {file_path}")
+                response['selected_files'].append(norm_path)
+                logger.info(f"{'Adding new' if is_new_static else 'Processing existing'} file: {norm_path}")
                 
             logger.info(f"Processed {response['metadata']['files_processed']} files, skipped {response['metadata']['files_skipped']}")
             logger.info(f"Selected files: {response['selected_files']}")
@@ -1356,7 +1377,8 @@ async def call_ai_multi_file(conversation, text, files_data):
 
         except json.JSONDecodeError as e:
             logger.error(f"JSON decode error: {str(e)}")
-            logger.error(f"Sanitized response causing error: {sanitized_response}")
+            if isinstance(sanitized_response, str):
+                logger.error(f"Sanitized response causing error: {sanitized_response}")
             return None
             
     except Exception as e:
@@ -1615,7 +1637,7 @@ def postprocess_django_template(template_content):
     processed = re.sub(r'TAG_(\w+)', r'{% \1 %}', processed)
     return processed
 
-def normalize_template_path(path: str) -> str:
+def normalize_template_path(path: str, project_context=None) -> str:
     """
     Normalize template path by handling templates/ prefix appropriately,
     but preserving app prefixes (like posts/ or users/)
