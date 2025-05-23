@@ -962,58 +962,84 @@ def handle_backtick_code_blocks(text: str) -> str:
 
 def sanitize_json_response(text: str) -> str:
     """
-    Sanitize JSON response by removing comments and fixing formatting issues.
-    Specifically handles the case where AI returns JSON with comments.
+    Sanitize JSON response by handling newlines and placeholders.
+    Preserves all content exactly as is, only fixes JSON formatting issues.
     """
     logger.debug("=== Sanitizing JSON Response ===")
-    logger.debug(f"Original response:\n{text[:500]}")
+    logger.debug(f"Original response first 200 chars:\n{text[:200]}")
     
     try:
-        # Remove JSON comments before parsing
-        lines = text.split('\n')
-        clean_lines = []
-        in_string = False
-        string_char = None
+        # Remove any leading/trailing whitespace and newlines
+        text = text.strip()
         
-        for line in lines:
-            logger.debug(f"Processing line: {line}")
-            cleaned = ''
-            i = 0
-            while i < len(line):
-                char = line[i]
-                
-                # Track string boundaries
-                if char in ['"', "'"] and (i == 0 or line[i-1] != '\\'):
-                    if not in_string:
-                        in_string = True
-                        string_char = char
-                    elif char == string_char:
-                        in_string = False
-                        string_char = None
-                
-                # Only process comments outside of strings
-                if not in_string and char == '/' and i + 1 < len(line) and line[i + 1] == '/':
-                    logger.debug(f"Found comment in line: {line}")
-                    break
-                
-                cleaned += char
-                i += 1
+        # Remove any response prefixes and extra newlines
+        prefixes_to_remove = ['RESPONSE:', 'JSON:', 'OUTPUT:', 'RESULT:']
+        for prefix in prefixes_to_remove:
+            if text.upper().startswith(prefix):
+                text = text[len(prefix):].strip()
+        
+        # Find the actual JSON content
+        json_start = text.find('{')
+        json_end = text.rfind('}') + 1  # Include the closing brace
+        if json_start >= 0 and json_end > json_start:
+            text = text[json_start:json_end]
             
-            if cleaned.strip():
-                clean_lines.append(cleaned)
+            # Remove any trailing content after the JSON
+            if text.count('{') == text.count('}'):
+                text = text.strip()
+            else:
+                # If braces don't match, try to find the proper ending
+                stack = []
+                for i, char in enumerate(text):
+                    if char == '{':
+                        stack.append(i)
+                    elif char == '}':
+                        if stack:
+                            stack.pop()
+                            if not stack:  # All braces matched
+                                text = text[:i+1]
+                                break
         
-        clean_json = '\n'.join(clean_lines)
-        logger.debug(f"Cleaned JSON:\n{clean_json[:500]}")
+        # Handle ellipsis and placeholder content
+        text = re.sub(r'"\s*\.\.\.\s*"', '""', text)  # "..." -> ""
+        text = re.sub(r'"\s*\.{3}.*?\.{3}\s*"', '""', text)  # "...content..." -> ""
+        text = re.sub(r'"<.*?>"', '""', text)  # "<placeholder>" -> ""
         
-        # Validate the cleaned JSON
+        # Temporarily replace Django template tags to prevent escaping
+        template_tags = []
+        def save_template_tag(match):
+            tag = match.group(0)
+            template_tags.append(tag)
+            return f"__TEMPLATE_TAG_{len(template_tags)-1}__"
+            
+        # Save template tags
+        text = re.sub(r'{%[^}]+%}|{{[^}]+}}', save_template_tag, text)
+        
+        # Fix string escaping
+        text = text.replace('\\', '\\\\')  # Escape backslashes first
+        text = text.replace('\n', '\\n')
+        text = text.replace('\t', '\\t')
+        text = text.replace('\r', '\\r')
+        text = text.replace('"', '\\"')
+        
+        # Restore template tags
+        for i, tag in enumerate(template_tags):
+            text = text.replace(f'"__TEMPLATE_TAG_{i}__"', json.dumps(tag))
+        
+        # Try to parse the JSON
         try:
-            parsed = json.loads(clean_json)
-            logger.debug("Successfully parsed cleaned JSON")
-            return json.dumps(parsed)
+            data = json.loads(text)
+            # Remove any empty or placeholder file contents
+            if isinstance(data, dict) and 'files' in data:
+                data['files'] = {
+                    k: v for k, v in data['files'].items() 
+                    if v and not v.isspace() and v != '...' and not v.startswith('...')
+                }
+            return json.dumps(data, indent=2)
         except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse cleaned JSON: {str(e)}")
+            logger.error(f"Failed to parse JSON: {str(e)}")
             logger.debug(f"Error location - line {e.lineno}, column {e.colno}")
-            logger.debug(f"Error context:\n{clean_json[max(0, e.pos-100):e.pos+100]}")
+            logger.debug(f"Error context:\n{text[max(0, e.pos-100):e.pos+100]}")
             return None
             
     except Exception as e:
@@ -1022,28 +1048,36 @@ def sanitize_json_response(text: str) -> str:
 
 VALIDATE_JSON_PROMPT = r"""You are a JSON validator and cleaner. Your task is to fix and validate the provided JSON.
 
-CRITICAL: YOU MUST RETURN ONLY A VALID JSON OBJECT WITH NO ADDITIONAL TEXT.
-
-RULES:
-1. Remove any comments (both // and /* */)
-2. Fix any formatting issues
-3. Ensure proper string escaping
-4. Remove any markdown formatting
-5. Remove any explanatory text
-6. Preserve the exact data structure
+CRITICAL RULES - YOU MUST FOLLOW THESE EXACTLY:
+1. Return ONLY a valid JSON object with NO additional text or explanation
+2. Preserve the exact data structure and field names
+3. Do not modify or assume any file paths - keep them exactly as provided
+4. For template files (ending in .html):
+   - Keep the exact path structure (app/templates/file.html or templates/file.html)
+   - Do not modify template paths or assume app names
+5. Remove any:
+   - Comments (both // and /* */)
+   - Markdown formatting (```, etc)
+   - Explanatory text
+   - Non-JSON content
+6. Ensure proper:
+   - String escaping
+   - JSON formatting
+   - Quote consistency (use double quotes)
+   - Template tag preservation (keep {% %} and {{ }} intact)
 
 Input JSON to clean:
 {input_json}
 
-Remember: Return ONLY the fixed JSON, nothing else."""
+REMEMBER: Return ONLY the fixed JSON object, nothing else. No explanation, no comments."""
 
 async def validate_json_with_ai(json_text: str) -> Optional[str]:
     """
     Use AI to validate and clean JSON response.
-    Only handles JSON validation, no other modifications.
+    Only handles JSON validation, no path modifications.
     """
     logger.debug("=== Validating JSON with AI ===")
-    logger.debug(f"Input JSON:\n{json_text[:500]}")
+    logger.debug(f"Input JSON first 200 chars:\n{json_text[:200]}")
     
     try:
         # First try to parse as is
@@ -1053,6 +1087,8 @@ async def validate_json_with_ai(json_text: str) -> Optional[str]:
             return json_text
         except json.JSONDecodeError as e:
             logger.debug(f"Initial JSON parse failed: {str(e)}")
+            logger.debug(f"Error location - line {e.lineno}, column {e.colno}")
+            logger.debug(f"Error context:\n{json_text[max(0, e.pos-100):e.pos+100]}")
         
         # Call AI for validation
         prompt = VALIDATE_JSON_PROMPT.format(input_json=json_text)
@@ -1062,11 +1098,21 @@ async def validate_json_with_ai(json_text: str) -> Optional[str]:
             logger.error("AI validation returned empty response")
             return None
             
-        logger.debug(f"AI validated response:\n{validated[:500]}")
+        logger.debug(f"AI validated response first 200 chars:\n{validated[:200]}")
         
         # Verify the AI response is valid JSON
         try:
-            json.loads(validated)
+            parsed = json.loads(validated)
+            # Extra validation for template paths
+            if isinstance(parsed, dict) and 'files' in parsed:
+                for path in parsed['files'].keys():
+                    if path.endswith('.html'):
+                        # Ensure template paths weren't modified
+                        original_parts = path.split('/')
+                        if 'templates' in original_parts:
+                            logger.debug(f"Template path preserved: {path}")
+                        else:
+                            logger.warning(f"Template path may have been modified: {path}")
             logger.debug("AI validation successful")
             return validated
         except json.JSONDecodeError as e:
@@ -1080,16 +1126,91 @@ async def validate_json_with_ai(json_text: str) -> Optional[str]:
 async def sanitize_ai_response(response_text: str, detect_analytics=False, request_text=None) -> str:
     """
     Sanitize AI response to ensure valid JSON for parsing.
-    This function now uses the centralized JSONValidator.
+    Preserves all paths and template tags exactly as provided.
     """
     if not response_text:
         logger.error("Empty response received in sanitize_ai_response")
-        return ''
+        return json.dumps({
+            "files": {},
+            "description": "Empty response",
+            "dependencies": {"python": [], "js": []}
+        })
 
     logger.debug(f"Input first 200 chars: {response_text[:200]}")
     
-    # Use the new JSONValidator for cleaning and validation
-    return await JSONValidator.sanitize_ai_response(response_text, detect_analytics, request_text)
+    try:
+        # Use the improved JSONValidator
+        is_valid, data, error = await JSONValidator.validate_and_parse(response_text)
+        
+        if is_valid and data:
+            # Add any missing required fields
+            if 'description' not in data:
+                data['description'] = "Generated from AI response"
+            if 'dependencies' not in data:
+                data['dependencies'] = {"python": [], "js": []}
+            if 'files' not in data:
+                data['files'] = {}
+            
+            # Handle analytics-specific requirements
+            if detect_analytics:
+                # Ensure Chart.js dependency
+                if 'js' not in data['dependencies']:
+                    data['dependencies']['js'] = []
+                if 'chart.js' not in data['dependencies']['js']:
+                    data['dependencies']['js'].append('chart.js')
+                
+                # Validate analytics-related files
+                for file_path, content in list(data['files'].items()):
+                    if file_path.endswith('.js') and 'chart' in file_path.lower():
+                        if not JSONValidator._is_placeholder_content(content) and not any(pattern in content for pattern in [
+                            'new Chart(',
+                            'Chart.defaults',
+                            'Chart.register',
+                            'createChart'
+                        ]):
+                            logger.warning(f"Analytics JS file {file_path} missing Chart.js initialization")
+                    elif file_path.endswith('.html'):
+                        if not JSONValidator._is_placeholder_content(content) and not any(pattern in content for pattern in [
+                            '<canvas',
+                            'chart-container',
+                            'data-chart'
+                        ]):
+                            logger.warning(f"Analytics template {file_path} missing chart elements")
+            
+            # Clean up file paths while preserving placeholders
+            cleaned_files = {}
+            for file_path, content in data['files'].items():
+                # Skip empty content but preserve placeholders
+                if not content or (content.isspace() and not JSONValidator._is_placeholder_content(content)):
+                    continue
+                    
+                # Normalize path
+                norm_path = normalize_path(file_path)
+                
+                # For templates, ensure we use just the filename
+                if norm_path.endswith('.html'):
+                    norm_path = os.path.basename(norm_path)
+                
+                cleaned_files[norm_path] = content
+            
+            data['files'] = cleaned_files
+            
+            return json.dumps(data, indent=2)
+        else:
+            logger.error(f"Failed to validate JSON: {error}")
+            return json.dumps({
+                "files": {},
+                "description": f"Failed to parse response: {error}",
+                "dependencies": {"python": [], "js": []}
+            })
+            
+    except Exception as e:
+        logger.error(f"Error in sanitize_ai_response: {str(e)}")
+        return json.dumps({
+            "files": {},
+            "description": f"Error processing response: {str(e)}",
+            "dependencies": {"python": [], "js": []}
+        })
 
 async def call_ai_multi_file(conversation, text, files_data):
     """Call AI service for multiple file changes with validation and refinement."""
@@ -1432,29 +1553,43 @@ def fix_json_formatting(json_str):
     return json_str
 
 def extract_json_with_regex(text):
-    """Extract JSON parts using regex when JSON parsing fails"""
-    result = {}
-    
-    # Try to extract refined_request using regex
-    refined_match = re.search(r'"refined_request"\s*:\s*"([^"]+)"', text)
-    if refined_match:
-        result["refined_request"] = refined_match.group(1)
-    
-    # Try to extract file_types
-    file_types = {}
-    for file_type in ["template", "view", "model", "static", "url"]:
-        file_type_match = re.search(rf'"{file_type}"\s*:\s*\[(.*?)\]', text, re.DOTALL)
-        if file_type_match:
-            items_str = file_type_match.group(1)
-            items = []
-            for item_match in re.finditer(r'"([^"]+)"', items_str):
-                items.append(item_match.group(1))
-            file_types[file_type] = items
-    
-    if file_types:
-        result["file_types"] = file_types
-    
-    return result if result else None
+    """Extract JSON using regex as fallback"""
+    try:
+        # Find the outermost JSON object
+        start = text.find('{')
+        if start == -1:
+            return None
+            
+        count = 1
+        pos = start + 1
+        
+        while count > 0 and pos < len(text):
+            if text[pos] == '{':
+                count += 1
+            elif text[pos] == '}':
+                count -= 1
+            pos += 1
+            
+        if count == 0:
+            json_str = text[start:pos]
+            # Escape JavaScript content before parsing
+            if '"static/js/' in json_str:
+                parts = json_str.split('"static/js/')
+                for i in range(1, len(parts)):
+                    js_part = parts[i]
+                    end_idx = js_part.find('",')
+                    if end_idx != -1:
+                        js_content = js_part[:end_idx]
+                        parts[i] = escape_js_content(js_content) + js_part[end_idx:]
+                json_str = '"static/js/'.join(parts)
+            return json.loads(json_str)
+        return None
+    except Exception:
+        return None
+
+def escape_js_content(content: str) -> str:
+    """Properly escape JavaScript content for JSON"""
+    return json.dumps(content)[1:-1]  # Remove the outer quotes but keep the escaping
 
 def preprocess_django_templates(text):
     """Replace Django template tags with placeholders to avoid JSON parsing issues"""

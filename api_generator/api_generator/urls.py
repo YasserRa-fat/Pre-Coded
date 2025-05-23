@@ -114,7 +114,7 @@ for urlfile in URLFile.objects.exclude(app__isnull=True):
     pid = urlfile.project.id
     module_tag = f"project_{pid}"
     appname = urlfile.app.name
-    modstr = f"projects.{module_tag}.apps.{appname}.urls"
+    modstr = f"dynamic_apps.project_{pid}_{appname}.urls"  # Updated path
     try:
         importlib.import_module(modstr)
         urlpatterns.append(
@@ -125,7 +125,7 @@ for urlfile in URLFile.objects.exclude(app__isnull=True):
         )
         # print(f"✅ Added app-level URL patterns for project {pid}, app {appname}")
     except ImportError:
-        print(f"❌ Failed to import app-level module: {modstr}")
+        print(f"❌ Failed to import app-level module: {modstr}, ✅ this error is expected from the try catch as urls are run from db")
         continue
 
 # 5) DRF router
@@ -146,12 +146,12 @@ urlpatterns.append(
     path('projects/<int:project_id>/preview/run/',
          PreviewRunAPIView.as_view(), name='preview-run'),
 )
-urlpatterns.append(
-    path(
-        f"projects/{pid}/",
-        include((exec_globals["urlpatterns"], namespace)),
-    )
-)
+# urlpatterns.append(
+#     path(
+#         f"projects/{pid}/",
+#         include((exec_globals["urlpatterns"], namespace)),
+#     )
+# )
 
 # Debug output
 # print("✅ Final URL patterns:")

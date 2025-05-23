@@ -18,6 +18,44 @@ from create_api.models import (
 
 logger = logging.getLogger(__name__)
 
+def initialize_project(project):
+    """Initialize a newly created project with apps and migrations"""
+    from core.startup import dynamic_register_apps, dynamic_register_and_dump
+    
+    # Register and dump apps
+    dynamic_register_apps()
+    dynamic_register_and_dump()
+    
+    # Create a dummy model file to trigger migrations if no apps exist yet
+    if not project.apps.exists():
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app_name = 'core'
+            app = App.objects.create(project=project, name=app_name)
+            
+            # Create a basic models.py
+            models_content = '''from django.db import models
+
+# Core app models
+class CoreConfig(models.Model):
+    name = models.CharField(max_length=100)
+    created_at = models.DateTimeField(auto_now_add=True)
+'''
+            models_path = os.path.join(temp_dir, 'models.py')
+            with open(models_path, 'w') as f:
+                f.write(models_content)
+                  
+            # Save it as a ModelFile
+            write_codefile(ModelFile, project, app, f'{app_name}/models.py', models_path)
+
+    # Run migrations for all apps in the project
+    db_alias = f"project_{project.id}"
+    for app in project.apps.all():
+        label = f"project_{project.id}_{app.name}"
+        try:
+            call_command('makemigrations', label, interactive=False, verbosity=1)
+            call_command('migrate', label, database=db_alias, interactive=False, verbosity=1)
+        except Exception as e:
+            logger.error(f"Error during initial migration for {label}: {e}")
 
 def write_codefile(model, project, app, rel_path, real_path, **extra):
     """
@@ -70,6 +108,9 @@ def create_project_skeleton(sender, instance, created, **kwargs):
 
             rel_path = os.path.join(instance.name, fname)
             write_codefile(model, instance, None, rel_path, real)
+            
+    # After project creation, register apps and run initial migrations
+    transaction.on_commit(lambda: initialize_project(instance))
 
 
 @receiver(post_save, sender=App)
@@ -90,8 +131,30 @@ def create_app_skeleton(sender, instance, created, **kwargs):
 
             if not os.path.exists(real):
                 stub = None
-                if rel == 'forms.py': stub = '# Sample forms.py content'
-                if rel == 'urls.py': stub = 'from django.urls import path\n\nurlpatterns = []\n'
+                if rel == 'forms.py': 
+                    stub = '# Sample forms.py content'
+                elif rel == 'urls.py': 
+                    stub = 'from django.urls import path\n\nurlpatterns = []\n'
+                elif rel == 'models.py':
+                    # Create a models.py with proper User model imports and settings
+                    stub = '''from django.db import models
+from django.conf import settings
+
+# Example model with proper User relationship settings
+class ExampleModel(models.Model):
+    # Example of how to properly set up User relationships
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='+',  # Disable reverse relation
+        db_constraint=False  # Disable DB-level foreign key constraint
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        # Add any model meta options here
+        pass
+'''
                 if stub:
                     with open(real, 'w', encoding='utf-8') as f:
                         f.write(stub)
@@ -128,43 +191,74 @@ def create_app_skeleton(sender, instance, created, **kwargs):
 
 @receiver(post_save, sender=ModelFile)
 def rebuild_and_migrate(sender, instance, created, **kwargs):
+    # Only rebuild if this is a models.py file or if it's a new file
+    if not (created or instance.path.endswith('models.py')):
+        return
+        
     # refresh dynamic apps on disk
     from core.startup import dynamic_register_apps, dynamic_register_and_dump
     dynamic_register_apps()
     dynamic_register_and_dump()
-    transaction.on_commit(lambda: _make_and_apply(instance))
+    
+    # Only make and apply migrations if this is a models.py file
+    if instance.path.endswith('models.py'):
+        transaction.on_commit(lambda: _make_and_apply(instance))
 
 def _make_and_apply(instance):
-    label = f"project_{instance.project_id}_{instance.app.name}"
-    db_alias = f"project_{instance.project_id}"
-
-    # Generate migrations for dynamic app
-    try:
-        call_command('makemigrations', label, interactive=False, verbosity=1)
-    except LookupError as e:
-        logger.warning(f"Skipping makemigrations for '{label}': no models found ({e})")
-        return
-    except Exception as e:
-        logger.error(f"Unexpected error during makemigrations for '{label}': {e}")
-        return
-
-    # Apply migrations, with retry and FieldDoesNotExist handling
-    for attempt in range(2):
+    project_id = instance.project_id
+    db_alias = f"project_{project_id}"
+    
+    # Get all apps for this project
+    apps_to_migrate = App.objects.filter(project_id=project_id)
+    
+    # First check which apps need migrations
+    apps_needing_migrations = []
+    for app in apps_to_migrate:
+        label = f"project_{project_id}_{app.name}"
         try:
-            call_command('migrate', label, database=db_alias, interactive=False, verbosity=1)
-            break
-        except LookupError as e:
-            logger.warning(f"Skipping migrate for '{label}' on '{db_alias}': {e}")
-            break
-        except models.ObjectDoesNotExist as e:
-            logger.error(f"FieldDoesNotExist during migrate for '{label}' on '{db_alias}': {e}")
-            break
+            # Use --dry-run to check if migrations are needed
+            from io import StringIO
+            import sys
+            output = StringIO()
+            sys.stdout = output
+            call_command('makemigrations', label, dry_run=True, verbosity=1)
+            sys.stdout = sys.__stdout__
+            
+            if "No changes detected" not in output.getvalue():
+                apps_needing_migrations.append(app)
         except Exception as e:
-            logger.error(f"Error applying migrations for '{label}' on '{db_alias}' [attempt {attempt+1}]: {e}")
-            if attempt == 1:
-                break
-            # on first failure, retry after a short pause
-            time.sleep(1)
+            logger.error(f"Error checking migrations for '{label}': {e}")
+            continue
+    
+    if not apps_needing_migrations:
+        logger.info("No migrations needed for any apps")
+        return
+        
+    # Make migrations only for apps that need them
+    for app in apps_needing_migrations:
+        label = f"project_{project_id}_{app.name}"
+        try:
+            logger.info(f"Making migrations for {label}")
+            call_command('makemigrations', label, interactive=False, verbosity=1)
+        except Exception as e:
+            logger.error(f"Error making migrations for '{label}': {e}")
+            continue
+    
+    # Then apply all migrations to ensure consistency
+    try:
+        logger.info(f"Applying migrations for project {project_id}")
+        # Apply migrations for the whole project database
+        call_command('migrate', database=db_alias, interactive=False, verbosity=1)
+    except Exception as e:
+        logger.error(f"Error applying migrations: {e}")
+        # If migration fails, try individual apps
+        for app in apps_to_migrate:
+            label = f"project_{project_id}_{app.name}"
+            try:
+                call_command('migrate', label, database=db_alias, interactive=False, verbosity=1)
+            except Exception as e:
+                logger.error(f"Error applying migrations for '{label}': {e}")
+                continue
 
 
 @receiver(post_save)
@@ -203,3 +297,146 @@ def delete_mediafile_on_delete(sender, instance, **kwargs):
 def load_projects_after_migrations(sender, **kwargs):
     for proj in Project.objects.all():
         logger.info(f"Loaded project: {proj.name}")
+
+def ensure_proper_user_relationships(content):
+    """
+    Ensures model file content has proper User relationship settings.
+    Returns (modified_content, was_modified)
+    """
+    import ast
+    import astor  # You'll need to add astor to requirements.txt
+    
+    was_modified = False
+    try:
+        # Parse the content
+        tree = ast.parse(content)
+        
+        class UserFieldTransformer(ast.NodeTransformer):
+            def visit_Call(self, node):
+                # Check if this is a ForeignKey or OneToOneField to User
+                if (isinstance(node.func, ast.Attribute) and 
+                    isinstance(node.func.value, ast.Name) and
+                    node.func.value.id == 'models' and
+                    node.func.attr in ('ForeignKey', 'OneToOneField')):
+                    
+                    # Check if this field references the User model
+                    is_user_field = False
+                    for arg in node.args:
+                        if (isinstance(arg, ast.Attribute) and 
+                            isinstance(arg.value, ast.Name) and
+                            arg.value.id == 'settings' and
+                            arg.attr == 'AUTH_USER_MODEL'):
+                            is_user_field = True
+                            break
+                    
+                    if is_user_field:
+                        # Get existing keyword arguments
+                        kwargs = {kw.arg: kw.value for kw in node.keywords}
+                        
+                        # Add or update required settings
+                        modified = False
+                        if 'related_name' not in kwargs or astor.to_source(kwargs['related_name']).strip("'") != '+':
+                            kwargs['related_name'] = ast.Constant(value='+')
+                            modified = True
+                        
+                        if 'db_constraint' not in kwargs or astor.to_source(kwargs['db_constraint']).strip() != 'False':
+                            kwargs['db_constraint'] = ast.Constant(value=False)
+                            modified = True
+                        
+                        if modified:
+                            nonlocal was_modified
+                            was_modified = True
+                            # Rebuild the node with updated kwargs
+                            new_keywords = [ast.keyword(arg=k, value=v) for k, v in kwargs.items()]
+                            return ast.Call(
+                                func=node.func,
+                                args=node.args,
+                                keywords=new_keywords
+                            )
+                
+                return self.generic_visit(node)
+        
+        # Apply the transformation
+        tree = UserFieldTransformer().visit(tree)
+        if was_modified:
+            # Generate the modified source code
+            return astor.to_source(tree), True
+            
+    except Exception as e:
+        logger.error(f"Error processing model content: {e}")
+        return content, False
+        
+    return content, False
+
+@receiver(post_save, sender=ModelFile)
+def ensure_model_settings(sender, instance, created, **kwargs):
+    """Ensures model files have proper User relationship settings"""
+    if not instance.path.endswith('models.py'):
+        return
+        
+    modified_content, was_modified = ensure_proper_user_relationships(instance.content)
+    if was_modified:
+        # Update the model file with the modified content
+        instance.content = modified_content
+        instance.save()  # This will trigger rebuild_and_migrate through the post_save signal
+
+def check_and_apply_migrations():
+    """Check and apply any pending migrations for all projects"""
+    from django.db.migrations.executor import MigrationExecutor
+    from django.db import connections
+    from django.apps import apps
+    
+    # Get all project databases
+    project_dbs = [alias for alias in connections.databases.keys() if alias.startswith('project_')]
+    
+    for db_alias in project_dbs:
+        try:
+            connection = connections[db_alias]
+            executor = MigrationExecutor(connection)
+            
+            # Get all apps for this project
+            project_id = int(db_alias.split('_')[1])
+            project_apps = [
+                app for app in apps.get_app_configs()
+                if app.label.startswith(f'project_{project_id}_')
+            ]
+            
+            # First make migrations for all apps
+            for app in project_apps:
+                try:
+                    logger.info(f"Making migrations for {app.label}")
+                    call_command('makemigrations', app.label, interactive=False, verbosity=1)
+                except Exception as e:
+                    logger.error(f"Error making migrations for '{app.label}': {e}")
+                    continue
+            
+            # Then apply all migrations for this database
+            try:
+                logger.info(f"Applying migrations for project {project_id}")
+                call_command('migrate', database=db_alias, interactive=False, verbosity=1)
+            except Exception as e:
+                logger.error(f"Error applying migrations: {e}")
+                # If batch migration fails, try individual apps
+                for app in project_apps:
+                    try:
+                        call_command('migrate', app.label, database=db_alias, interactive=False, verbosity=1)
+                    except Exception as e:
+                        logger.error(f"Error applying migrations for '{app.label}': {e}")
+                        continue
+                
+        except Exception as e:
+            logger.error(f"Error checking migrations for {db_alias}: {e}")
+            continue
+
+@receiver(post_migrate)
+def handle_post_migrate(sender, **kwargs):
+    """Handle any necessary tasks after migrations are applied"""
+    app_config = kwargs.get('app_config')
+    if app_config and app_config.label.startswith('project_'):
+        # Refresh dynamic apps after migrations
+        from core.startup import dynamic_register_apps, dynamic_register_and_dump
+        dynamic_register_apps()
+        dynamic_register_and_dump()
+        
+        # Check if any other migrations are needed
+        check_and_apply_migrations()

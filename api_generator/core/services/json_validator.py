@@ -5,11 +5,44 @@ from typing import Optional, Tuple, Dict, Any, List
 import traceback
 from pathlib import Path
 import os
+import ast
 
 logger = logging.getLogger(__name__)
 
 class JSONValidator:
     """Centralized service for handling JSON validation and cleaning"""
+
+    PLACEHOLDER_PATTERNS = [
+        '...',
+        '...content...',
+        '...complete file content with your changes...',
+        '...existing code...',
+        '...rest of the code...',
+        '// ... existing code ...',
+        '# ... existing code ...',
+        '<!-- ... existing code ... -->',
+        '{/* ... existing code ... */}',
+        '/* ... existing code ... */'
+    ]
+
+    FILE_TYPE_PATTERNS = {
+        'python': {
+            'required': [r'(?:^|\n)(?:import|from)\s+\w+'],
+            'optional': [r'class\s+\w+', r'def\s+\w+', r'@\w+']
+        },
+        'template': {
+            'required': [r'{%.*?%}|{{.*?}}|<!DOCTYPE\s+html|<html'],
+            'optional': [r'<div', r'<script', r'<style']
+        },
+        'javascript': {
+            'required': [r'(?:^|\n)(?:import|export|function|class|const|let|var)\s+\w+'],
+            'optional': [r'addEventListener', r'querySelector', r'document\.']
+        },
+        'css': {
+            'required': [r'[.#]?\w+\s*{'],
+            'optional': [r'@media', r'@import', r'@keyframes']
+        }
+    }
 
     @staticmethod
     def is_feature_related(content: str) -> bool:
@@ -224,91 +257,405 @@ Return the complete, valid file content with proper structure."""
             return text
 
     @classmethod
-    async def validate_and_parse(cls, text: str, detect_features=False) -> Tuple[bool, Optional[Dict[str, Any]], str]:
-        """Validate and parse AI-generated JSON with enhanced debugging"""
+    async def validate_and_parse(cls, text: str) -> tuple[bool, dict, str]:
+        """
+        Validate and parse AI response with comprehensive error checking and detailed reporting.
+        Returns tuple of (is_valid: bool, data: Optional[dict], error_message: Optional[str])
+        """
         if not text:
-            return False, None, "Empty response text"
+            return False, None, "Empty response"
             
         try:
-            logger.debug("=== Starting Response Validation ===")
-            logger.debug("Feature detection: %s", detect_features)
-            logger.debug("Input text length: %d", len(text))
+            logger.debug("=== Starting Comprehensive JSON Validation ===")
+            logger.debug(f"Input text length: {len(text)}")
             
-            # Clean and normalize JSON
-            cleaned_text = cls._clean_json_response(text)
+            # Phase 1: Pre-processing and initial cleaning
+            logger.debug("Phase 1: Pre-processing")
+            text = cls.preprocess_json(text)
             
+            # Phase 2: Parse JSON
             try:
-                parsed = json.loads(cleaned_text)
-                logger.debug("Successfully parsed JSON")
+                data = json.loads(text)
                 
-                # Basic structure validation
-                if isinstance(parsed, dict):
-                    # Convert any non-dict files section to dict
-                    if 'files' in parsed and not isinstance(parsed['files'], dict):
-                        logger.debug("Converting files section to dict")
-                        files_content = str(parsed['files'])
-                        parsed['files'] = {}
-                        if ':' in files_content:
-                            for line in files_content.split('\n'):
-                                if ':' in line:
-                                    key, value = line.split(':', 1)
-                                    parsed['files'][key.strip()] = value.strip()
-                    
-                    return True, parsed, None
-                    
-                return False, None, "Invalid JSON structure"
+                # Process file contents
+                if isinstance(data, dict) and 'files' in data:
+                    for file_path, content in data['files'].items():
+                        if isinstance(content, str):
+                            # Skip placeholder content
+                            if cls._is_placeholder_content(content):
+                                continue
+                            # Handle code content
+                            data['files'][file_path] = cls._handle_code_content(content)
+                
+                return True, data, None
                 
             except json.JSONDecodeError as e:
-                logger.error("JSON decode error: %s", str(e))
-                cls._debug_json_error(cleaned_text, e)
-                return False, None, str(e)
+                logger.error(f"JSON decode error: {str(e)}")
+                cls._debug_json_error(text, e)
+                
+                # Try recovery
+                recovered_data = await cls._attempt_json_recovery(text, e)
+                if recovered_data:
+                    logger.info("Successfully recovered JSON data")
+                    return True, recovered_data, None
+                    
+                error_msg = cls._format_json_error(e, text)
+                return False, None, error_msg
                 
         except Exception as e:
-            logger.error("Error in validate_and_parse: %s", str(e))
+            logger.error(f"Validation error: {str(e)}")
             logger.error(traceback.format_exc())
-            return False, None, str(e)
+            return False, None, f"Validation error: {str(e)}"
+
+    @classmethod
+    def _remove_response_prefix(cls, text: str) -> str:
+        """Remove common response prefixes"""
+        prefixes = ['RESPONSE:', 'JSON:', 'OUTPUT:', 'RESULT:']
+        text = text.strip()
+        for prefix in prefixes:
+            if text.upper().startswith(prefix):
+                return text[len(prefix):].strip()
+        return text
+
+    @classmethod
+    def _handle_multiple_json_objects(cls, text: str) -> str:
+        """Handle cases with multiple JSON objects"""
+        if '}{' in text:  # Multiple objects - take the first complete one
+            return text[:text.find('}{') + 1]
+        return text
+
+    @classmethod
+    def _validate_structure(cls, text: str) -> List[str]:
+        """Validate basic JSON structure"""
+        issues = []
+        
+        # Check for basic JSON indicators
+        if not ('{' in text and '}' in text):
+            issues.append("No valid JSON object structure found")
+            return issues
+        
+        # Check bracket balance
+        brace_count = text.count('{') - text.count('}')
+        if brace_count != 0:
+            issues.append(f"Unbalanced braces: {abs(brace_count)} {'extra' if brace_count > 0 else 'missing'} closing braces")
+        
+        # Check quote balance
+        quote_count = text.count('"') % 2
+        if quote_count != 0:
+            issues.append("Unbalanced quotes")
+        
+        return issues
+
+    @classmethod
+    async def _attempt_json_recovery(cls, text: str, error: json.JSONDecodeError) -> Optional[dict]:
+        """Attempt to recover from JSON parsing errors"""
+        try:
+            # Try fixing common issues
+            fixed_text = cls._fix_common_json_issues(text)
+            return json.loads(fixed_text)
+        except:
+            try:
+                # Try extracting valid JSON object
+                extracted = cls.extract_json_with_regex(text)
+                if extracted:
+                    return extracted
+            except:
+                return None
+
+    @classmethod
+    def _fix_common_json_issues(cls, text: str) -> str:
+        """Fix common JSON formatting issues"""
+        # Remove trailing commas
+        text = re.sub(r',(\s*[}\]])', r'\1', text)
+        
+        # Fix missing commas
+        text = re.sub(r'([^"\\])"([^":{},\[\]\s]+"?\s*:)', r'\1",\2', text)
+        
+        # Fix unescaped quotes
+        text = re.sub(r'(?<!\\)"(?![\s,}\]])', r'\"', text)
+        
+        return text
+
+    @classmethod
+    def _format_json_error(cls, error: json.JSONDecodeError, text: str) -> str:
+        """Format JSON error with context"""
+        error_context = text[max(0, error.pos-50):min(len(text), error.pos+50)]
+        error_pointer = " " * (min(50, error.pos)) + "^"
+        return f"JSON decode error: {str(error)}\nContext:\n{error_context}\n{error_pointer}"
+
+    @classmethod
+    def _validate_file_path(cls, path: str) -> Tuple[bool, List[str]]:
+        """Validate file path"""
+        issues = []
+        
+        if not isinstance(path, str):
+            return False, [f"Invalid path type: {type(path)}"]
+        
+        if not path:
+            return False, ["Empty file path"]
+        
+        if len(path) > 255:
+            issues.append("File path exceeds maximum length")
+        
+        if '..' in path:
+            issues.append("Path contains parent directory traversal")
+        
+        if '\\' in path:
+            issues.append("Path contains backslashes (use forward slashes)")
+        
+        return len(issues) == 0, issues
+
+    @classmethod
+    async def _validate_file_content(cls, file_path: str, content: str) -> tuple[bool, str, list[str]]:
+        """Validate and process file content based on file type"""
+        if not content:
+            return False, "", ["Empty file content"]
+            
+        issues = []
+        try:
+            # Handle placeholder content
+            if cls._is_placeholder_content(content):
+                logger.debug(f"Placeholder content detected in {file_path}")
+                return True, content, ["Placeholder content will be replaced with actual implementation"]
+            
+            # Get file type from extension
+            ext = os.path.splitext(file_path)[1].lower()
+            
+            # Process based on file type
+            if ext in ['.py', '.pyw']:
+                # Basic Python validation
+                try:
+                    ast.parse(content)
+                except SyntaxError as e:
+                    issues.append(f"Python syntax error: {str(e)}")
+                    return False, content, issues
+                
+                # Check for basic structure but don't require it
+                if not re.search(r'(?:^|\\n)(?:import|from)\\s+\\w+', content):
+                    issues.append("Missing imports (warning)")
+                if not re.search(r'(?:class|def)\\s+\\w+', content):
+                    issues.append("No classes or functions defined (warning)")
+                
+            elif ext in ['.html', '.htm']:
+                # Basic template validation
+                if not ('{% extends' in content or '<!DOCTYPE' in content or '<html' in content):
+                    issues.append("Missing template structure (warning)")
+                if not re.search(r'{%.*?%}|{{.*?}}', content):
+                    issues.append("No template tags found (warning)")
+                
+            elif ext in ['.js', '.jsx']:
+                # Basic JS validation
+                if not re.search(r'function\\s+\\w+|class\\s+\\w+|const\\s+\\w+|let\\s+\\w+|var\\s+\\w+', content):
+                    issues.append("Missing JavaScript declarations (warning)")
+                
+            elif ext in ['.css', '.scss', '.sass']:
+                # Basic CSS validation
+                if not re.search(r'[.#]?\\w+\\s*{', content):
+                    issues.append("No CSS rules found (warning)")
+            
+            # Always return True unless there are critical errors
+            # Warnings are just logged but don't invalidate the content
+            critical_issues = [i for i in issues if "warning" not in i.lower()]
+            if critical_issues:
+                return False, content, critical_issues
+            
+            return True, content, issues
+            
+        except Exception as e:
+            logger.error(f"Error validating {file_path}: {str(e)}")
+            return False, content, [f"Validation error: {str(e)}"]
+
+    @classmethod
+    def _is_placeholder_content(cls, content: str) -> bool:
+        """Check if content is a placeholder that needs to be implemented"""
+        if not isinstance(content, str):
+            return False
+            
+        # Common placeholder patterns
+        patterns = [
+            r'^\.{3,}$',  # Just dots
+            r'^\.{3,}.*\.{3,}$',  # Dots with text in between
+            r'^\s*<placeholder>.*</placeholder>\s*$',
+            r'^\s*TODO:.*$',
+            r'^\s*IMPLEMENT:.*$',
+            r'^\s*#\s*\.{3,}\s*$',  # Python comment with dots
+            r'^\s*//\s*\.{3,}\s*$',  # JS comment with dots
+            r'^\s*/\*\s*\.{3,}\s*\*/\s*$'  # CSS comment with dots
+        ]
+        
+        # Check if content matches any placeholder pattern
+        content = content.strip()
+        return any(re.match(pattern, content, re.DOTALL | re.IGNORECASE) for pattern in patterns)
+
+    @classmethod
+    def _validate_dependencies(cls, dependencies: Any) -> List[str]:
+        """Validate dependencies structure"""
+        issues = []
+        
+        if not isinstance(dependencies, dict):
+            return ["'dependencies' must be a dictionary"]
+        
+        required_fields = {'python', 'js'}
+        missing_fields = required_fields - set(dependencies.keys())
+        if missing_fields:
+            issues.append(f"Missing dependency fields: {', '.join(missing_fields)}")
+        
+        for dep_type, deps in dependencies.items():
+            if not isinstance(deps, list):
+                issues.append(f"Dependencies for {dep_type} must be a list")
+            else:
+                # Clean and validate each dependency
+                dependencies[dep_type] = [str(d).strip() for d in deps if str(d).strip()]
+        
+        return issues
+
+    @staticmethod
+    def _normalize_file_path(path: str) -> str:
+        """Normalize file path to consistent format"""
+        if not path:
+            return ""
+        # Convert to forward slashes and remove any leading/trailing slashes
+        clean_path = path.replace('\\', '/').strip('/')
+        # Remove any parent directory traversal
+        while '../' in clean_path:
+            clean_path = clean_path.replace('../', '')
+        return clean_path
 
     @classmethod
     def preprocess_json(cls, text: str) -> str:
-        """Preprocess JSON with separated concerns"""
+        """Preprocess JSON with enhanced code content handling"""
         logger.debug("=== Starting JSON Preprocessing ===")
         
         try:
-            # Remove markdown markers first
-            text = cls._remove_markdown_markers(text)
+            # Remove markdown code block markers
+            text = text.replace('```json\n', '').replace('```', '')
             
-            # Handle backtick-quoted content
-            text = cls._handle_backtick_content(text)
+            # Remove RESPONSE: prefix if present
+            if text.strip().upper().startswith('RESPONSE:'):
+                text = text[text.upper().find('RESPONSE:') + 9:].strip()
             
-            # Attempt to extract JSON if we still can't parse it
-            try:
-                json.loads(text)
-            except json.JSONDecodeError:
-                # Try to find a valid JSON object in the text
-                if '{' in text and '}' in text:
-                    first_brace = text.find('{')
-                    last_brace = text.rfind('}')
-                    if first_brace != -1 and last_brace != -1 and first_brace < last_brace:
-                        logger.debug("Extracting JSON object from text")
-                        text = text[first_brace:last_brace+1]
+            # Find the actual JSON content
+            json_start = text.find('{')
+            json_end = text.rfind('}') + 1
+            if json_start >= 0 and json_end > json_start:
+                text = text[json_start:json_end]
             
-            # Fix escape sequences
-            text = cls._fix_escape_sequences(text)
+            # First pass: Extract placeholders to preserve them
+            placeholders = {}
+            placeholder_count = 0
             
-            # Try to parse JSON to validate
+            def save_placeholder(match):
+                nonlocal placeholder_count
+                content = match.group(0)
+                if content in cls.PLACEHOLDER_PATTERNS:
+                    key = f"__PLACEHOLDER_{placeholder_count}__"
+                    placeholders[key] = content
+                    placeholder_count += 1
+                    return f'"{key}"'
+                return content
+            
+            # Save placeholders
+            for pattern in cls.PLACEHOLDER_PATTERNS:
+                text = text.replace(f'"{pattern}"', save_placeholder(pattern))
+            
+            # Second pass: Extract code content
+            code_blocks = {}
+            code_block_count = 0
+            
+            def save_code_block(match):
+                nonlocal code_block_count
+                content = match.group(1)
+                # Skip if it's a placeholder
+                if any(p in content for p in cls.PLACEHOLDER_PATTERNS):
+                    return f'"{content}"'
+                placeholder = f"__CODE_BLOCK_{code_block_count}__"
+                code_blocks[placeholder] = content
+                code_block_count += 1
+                return f'"{placeholder}"'
+            
+            # Extract code content from JSON strings
+            text = re.sub(r'"((?:[^"\\]|\\.)*)"', save_code_block, text)
+            
+            # Fix common JSON formatting issues
+            text = cls._fix_json_formatting(text)
+            
+            # Process each code block
+            for placeholder, content in code_blocks.items():
+                # Properly escape newlines
+                content = content.replace('\n', '\\n')
+                # Escape quotes
+                content = content.replace('"', '\\"')
+                # Fix double escaping
+                content = content.replace('\\\\n', '\\n')
+                content = content.replace('\\\\"', '\\"')
+                # Replace placeholder with processed content
+                text = text.replace(f'"{placeholder}"', f'"{content}"')
+            
+            # Restore placeholders
+            for key, content in placeholders.items():
+                text = text.replace(f'"{key}"', f'"{content}"')
+            
+            # Final cleanup
+            text = text.strip()
+            
+            # Remove trailing commas
+            text = re.sub(r',(\s*[}\]])', r'\1', text)
+            
+            # Validate the result
             try:
                 json.loads(text)
                 logger.debug("JSON validation successful after preprocessing")
             except json.JSONDecodeError as e:
-                logger.error("JSON still invalid after preprocessing: %s", str(e))
+                logger.error(f"JSON still invalid after preprocessing: {str(e)}")
                 cls._debug_json_error(text, e)
             
             return text
             
         except Exception as e:
-            logger.error("Error in preprocessing: %s", str(e))
+            logger.error(f"Error in preprocessing: {str(e)}")
             logger.error(traceback.format_exc())
             return text
+
+    @staticmethod
+    def _fix_json_formatting(text: str) -> str:
+        """Fix common JSON formatting issues"""
+        # Remove trailing commas
+        text = re.sub(r',(\s*[}\]])', r'\1', text)
+        
+        # Fix missing quotes around property names
+        text = re.sub(r'([{,]\s*)(\w+)(:)', r'\1"\2"\3', text)
+        
+        # Fix missing commas between elements
+        text = re.sub(r'(["}\]])\s*({"?\w+"|[\[{])', r'\1,\2', text)
+        
+        # Fix spaces in property names
+        text = re.sub(r'"([^"]+)\s+([^"]+)":', r'"\1\2":', text)
+        
+        # Fix unescaped newlines in strings
+        text = re.sub(r'(?<!\\)\n', '\\n', text)
+        
+        return text
+
+    @staticmethod
+    def _handle_code_content(content: str) -> str:
+        """Process code content to ensure proper escaping"""
+        # Escape newlines
+        content = content.replace('\n', '\\n')
+        
+        # Escape quotes
+        content = content.replace('"', '\\"')
+        
+        # Fix any double escaping
+        content = content.replace('\\\\n', '\\n')
+        content = content.replace('\\\\"', '\\"')
+        
+        # Handle template tags
+        content = content.replace('{%', '\\{%')
+        content = content.replace('%}', '%\\}')
+        content = content.replace('{{', '\\{{')
+        content = content.replace('}}', '\\}}')
+        
+        return content
 
     @staticmethod
     def _debug_json_error(text: str, error: json.JSONDecodeError):
@@ -328,447 +675,104 @@ Return the complete, valid file content with proper structure."""
             logger.error("Error position: %s^", ' ' * (error.colno - 1))
 
     @staticmethod
-    def _handle_backtick_content(text: str) -> str:
-        """Handle backtick-quoted content in JSON responses"""
-        logger.debug("=== Handling Backtick Content ===")
-        logger.debug("Input text sample: %s", text[:100])
+    def _debug_feature_detection(content: str, patterns: List[str]):
+        """Debug helper for feature detection"""
+        logger.debug("=== Feature Detection Analysis ===")
+        logger.debug(f"Content length: {len(content)}")
+        logger.debug("First 100 chars:\n%s", content[:100])
         
-        try:
-            # Track if we're inside a JSON string
-            in_json_string = False
-            in_backtick = False
-            result = []
-            i = 0
-            
-            while i < len(text):
-                char = text[i]
-                
-                if char == '"' and (i == 0 or text[i-1] != '\\'):
-                    in_json_string = not in_json_string
-                    result.append(char)
-                elif char == '`' and not in_json_string:
-                    # Found a backtick outside JSON string
-                    if not in_backtick:
-                        # Start of backtick block - replace with JSON string start
-                        in_backtick = True
-                        result.append('"')
-                    else:
-                        # End of backtick block - replace with JSON string end
-                        in_backtick = False
-                        result.append('"')
-                else:
-                    if in_backtick:
-                        # Inside backtick block - escape special characters
-                        if char == '"':
-                            result.append('\\"')
-                        elif char == '\n':
-                            result.append('\\n')
-                        elif char == '\r':
-                            result.append('\\r')
-                        elif char == '\\':
-                            result.append('\\\\')
-                        else:
-                            result.append(char)
-                    else:
-                        result.append(char)
-                i += 1
-                
-            processed = ''.join(result)
-            logger.debug("Processed text sample: %s", processed[:100])
-            return processed
-            
-        except Exception as e:
-            logger.error("Error handling backtick content: %s", str(e))
-            logger.error(traceback.format_exc())
-            return text
+        for pattern in patterns:
+            matches = re.finditer(pattern, content, re.IGNORECASE)
+            for match in matches:
+                logger.debug(f"Pattern '{pattern}' matched: {match.group(0)}")
+                context_start = max(0, match.start() - 50)
+                context_end = min(len(content), match.end() + 50)
+                logger.debug(f"Match context:\n{content[context_start:context_end]}")
 
     @staticmethod
-    def _handle_control_chars(text: str) -> str:
-        """Handle control characters in JSON"""
-        logger.debug("=== Processing Control Characters ===")
-        logger.debug(f"Input length: {len(text)}")
+    def _debug_structure_validation(file_path: str, content: str, file_type: str):
+        """Debug helper for structure validation"""
+        logger.debug("\n=== Structure Validation Analysis ===")
+        logger.debug(f"File: {file_path}")
+        logger.debug(f"Type: {file_type}")
+        logger.debug(f"Content length: {len(content)}")
+        logger.debug("First 100 chars:\n%s", content[:100])
         
-        # Remove or replace control characters
-        cleaned = ""
-        for i, char in enumerate(text):
-            if ord(char) < 32 and char not in '\n\r\t':
-                logger.debug(f"Found control char at pos {i}: {ord(char)}")
-                continue
-            cleaned += char
-        
-        logger.debug(f"After control char processing length: {len(cleaned)}")
-        return cleaned
+        # Check for common structural elements
+        if file_type == "python":
+            imports = re.findall(r'^import\s+.*$|^from\s+.*\s+import\s+.*$', content, re.MULTILINE)
+            classes = re.findall(r'^class\s+\w+.*:$', content, re.MULTILINE)
+            functions = re.findall(r'^def\s+\w+\s*\(.*\):$', content, re.MULTILINE)
+            
+            logger.debug("Python structure:")
+            logger.debug(f"- Imports: {len(imports)}")
+            logger.debug(f"- Classes: {len(classes)}")
+            logger.debug(f"- Functions: {len(functions)}")
+            
+        elif file_type == "template":
+            extends = re.findall(r'{%\s*extends\s+[\'"].*?[\'"]\s*%}', content)
+            blocks = re.findall(r'{%\s*block\s+\w+\s*%}', content)
+            includes = re.findall(r'{%\s*include\s+[\'"].*?[\'"]\s*%}', content)
+            
+            logger.debug("Template structure:")
+            logger.debug(f"- Extends: {len(extends)}")
+            logger.debug(f"- Blocks: {len(blocks)}")
+            logger.debug(f"- Includes: {len(includes)}")
+            
+        elif file_type == "javascript":
+            functions = re.findall(r'function\s+\w+\s*\(.*?\)', content)
+            classes = re.findall(r'class\s+\w+\s*{', content)
+            imports = re.findall(r'import\s+.*?from\s+[\'"].*?[\'"]\s*;?', content)
+            
+            logger.debug("JavaScript structure:")
+            logger.debug(f"- Functions: {len(functions)}")
+            logger.debug(f"- Classes: {len(classes)}")
+            logger.debug(f"- Imports: {len(imports)}")
 
     @staticmethod
-    def _handle_newlines(text: str) -> str:
-        """Handle newlines in JSON strings"""
-        logger.debug("=== Processing Newlines ===")
+    def _extract_template_tags(text: str) -> tuple[str, list]:
+        """Extract Django template tags and replace with placeholders"""
+        template_tags = []
         
-        def escape_string_newlines(match):
-            content = match.group(1)
-            escaped = content.replace('\n', '\\n')
-            logger.debug(f"Escaped newlines in string sample:\n{escaped[:100]}...")
-            return f'"{escaped}"'
-        
-        # Escape newlines inside JSON strings
-        processed = re.sub(r'"([^"]*)"', escape_string_newlines, text)
-        logger.debug(f"After newline processing sample:\n{processed[:200]}")
-        return processed
-
-    @classmethod
-    def extract_json_with_regex(cls, text):
-        """Extract JSON using regex when JSON parsing fails"""
-        try:
-            logger.debug("Attempting regex-based JSON extraction")
+        def save_tag(match):
+            tag = match.group(0)
+            template_tags.append(tag)
+            return f"__TEMPLATE_TAG_{len(template_tags)-1}__"
             
-            # Try to find a JSON object ignoring any prefixes or suffixes
-            match = re.search(r'(\{[\s\S]*\})', text, re.DOTALL)
-            if match:
-                json_str = match.group(1)
-                try:
-                    return json.loads(cls.preprocess_json(json_str))
-                except Exception as parse_error:
-                    logger.error(f"JSON parsing failed after regex extraction: {str(parse_error)}")
-                
-            # Try to extract files map
-            files = {}
-            file_matches = re.finditer(r'"([^"]+)":\s*"([^"]+)"', text)
-            for match in file_matches:
-                files[match.group(1)] = match.group(2)
-                
-            if files:
-                return {"files": files}
-                
-            return None
-            
-        except Exception as e:
-            logger.error(f"Regex extraction failed: {str(e)}")
-            return None
-            
-    @classmethod
-    async def ensure_complete_file_content(cls, files_dict, request_text=None):
-        """Ensure all file contents are complete files, not just fragments."""
-        logger.debug("=== Starting Dynamic Content Validation ===")
+        # Extract {% %} and {{ }} tags
+        pattern = r'{%[^}]+%}|{{[^}]+}}'
+        processed = re.sub(pattern, save_tag, text)
         
-        # Process each file
-        dynamic_updates = {}
-        
-        # Track feature files and their relationships
-        feature_files = []
-        view_files = []
-        template_files = []
-        
-        # Create a mapping of templates by their app
-        template_by_app = {}
-        
-        # First pass: Identify all feature-related files and their types
-        for file_path, content in files_dict.items():
-            logger.debug(f"Processing file: {file_path}")
-            
-            # Use dynamic feature detection
-            if cls.is_feature_related(content):
-                feature_files.append(file_path)
-                
-                if file_path.endswith('views.py'):
-                    view_files.append(file_path)
-                    logger.debug(f"Found view file with features: {file_path}")
-                elif file_path.endswith('.html'):
-                    template_files.append(file_path)
-                    
-                    # Extract app from template path
-                    app_name = None
-                    path_parts = file_path.split('/')
-                    
-                    # Handle different template path formats
-                    if len(path_parts) >= 2:
-                        # Case 1: app/templates/template.html
-                        if 'templates' in path_parts:
-                            template_index = path_parts.index('templates')
-                            if template_index > 0:
-                                app_name = path_parts[template_index-1]
-                        # Case 2: app/template.html
-                        else:
-                            app_name = path_parts[0]
-                    
-                    if app_name:
-                        if app_name not in template_by_app:
-                            template_by_app[app_name] = []
-                        template_by_app[app_name].append(file_path)
-                        logger.debug(f"Associated template {file_path} with app {app_name}")
-                    
-                    logger.debug(f"Found template file with features: {file_path}")
-                    
-                # Validate and update file structure based on type
-                if file_path.endswith('.py'):
-                    logger.debug(f"Validating Python file structure: {file_path}")
-                    dynamic_updates[file_path] = await cls.get_dynamic_structure(file_path, content, "python")
-                elif file_path.endswith('.html'):
-                    logger.debug(f"Validating template file structure: {file_path}")
-                    dynamic_updates[file_path] = await cls.get_dynamic_structure(file_path, content, "template")
-                elif file_path.endswith('.js'):
-                    logger.debug(f"Validating JavaScript file structure: {file_path}")
-                    dynamic_updates[file_path] = await cls.get_dynamic_structure(file_path, content, "javascript")
-        
-        # Second pass: Ensure view-template relationships are properly handled
-        if template_files and not view_files:
-            logger.debug("Templates found but no corresponding views")
-            
-            # For each template, find its corresponding existing view file
-            for app_name, app_templates in template_by_app.items():
-                view_path = f"{app_name}/views.py"
-                logger.debug(f"Looking for existing view file: {view_path}")
-                
-                # Only update existing view files, never create new ones
-                if view_path in files_dict:
-                    logger.debug(f"Using existing view file: {view_path}")
-                    view_content = files_dict[view_path]
-                    dynamic_updates[view_path] = await cls.get_dynamic_structure(view_path, view_content, "python")
-                else:
-                    logger.debug(f"View file {view_path} not found - skipping")
-
-        # Apply all updates
-        for file_path, updated_content in dynamic_updates.items():
-            logger.debug(f"Applying validated updates to {file_path}")
-            files_dict[file_path] = updated_content
-
-        # Run strict AI review on all files
-        files_dict = await cls.strict_ai_review(files_dict, request_text)
-
-        return files_dict
+        return processed, template_tags
 
     @staticmethod
-    def _debug_response_format(text: str):
-        """Debug helper to identify response format"""
-        logger.debug("=== Response Format Analysis ===")
-        first_char = text.strip()[0] if text.strip() else 'empty'
-        logger.debug("First character: %s", first_char)
-        logger.debug("Starts with JSON: %s", text.strip().startswith('{'))
-        logger.debug("Contains recommendations: %s", 'RECOMMENDATIONS:' in text)
-        logger.debug("First 100 chars:\n%s", text[:100])
+    def _restore_template_tags(text: str, template_tags: list) -> str:
+        """Restore Django template tags from placeholders"""
+        result = text
+        for i, tag in enumerate(template_tags):
+            placeholder = f'"__TEMPLATE_TAG_{i}__"'
+            # Properly escape the tag for JSON
+            escaped_tag = json.dumps(tag)[1:-1]  # Remove outer quotes
+            result = result.replace(placeholder, escaped_tag)
+        return result
 
     @staticmethod
-    def _convert_recommendations_to_json(text: str) -> str:
-        """Convert recommendations format to JSON"""
-        logger.debug("Converting recommendations to JSON format")
-        if not text.strip().startswith('RECOMMENDATIONS:'):
-            return text
-            
-        try:
-            # Extract file content sections if they exist
-            file_content_start = text.find('```')
-            files_json = {}
-            
-            if file_content_start != -1:
-                # Process file contents
-                parts = text.split('```')
-                for i in range(1, len(parts), 2):
-                    if i + 1 < len(parts):
-                        file_header = parts[i].strip().split('\n')[0]
-                        file_content = parts[i+1].strip()
-                        if file_header:
-                            files_json[file_header] = file_content
-            
-            # Create proper JSON structure
-            response_json = {
-                "files": files_json,
-                "recommendations": [
-                    line.strip()[2:].strip() 
-                    for line in text.split('\n') 
-                    if line.strip() and line.strip()[0].isdigit()
-                ]
-            }
-            
-            logger.debug("Converted to JSON structure with %d files", len(files_json))
-            return json.dumps(response_json)
-            
-        except Exception as e:
-            logger.error("Error converting recommendations to JSON: %s", str(e))
-            return text
-
-    @staticmethod
-    def _sanitize_file_content(content: str) -> str:
-        """Sanitize file content within JSON"""
-        logger.debug("Sanitizing file content")
-        try:
-            # Escape quotes in HTML attributes
-            content = re.sub(r'(\s+\w+)="([^"]*)"', r'\1=\"\2\"', content)
-            # Escape newlines
-            content = content.replace('\n', '\\n')
-            # Escape backslashes
-            content = content.replace('\\', '\\\\')
-            # Escape quotes
-            content = content.replace('"', '\\"')
-            logger.debug("File content sanitized successfully")
-            return content
-        except Exception as e:
-            logger.error("Error sanitizing file content: %s", str(e))
-            return content
-
-    @classmethod
-    async def sanitize_ai_response(cls, response_text: str, detect_features=False, request_text=None) -> str:
-        """Main sanitization entry point with enhanced debugging"""
-        if not response_text:
-            return ""
-            
-        # Debug the response format
-        cls._debug_response_format(response_text)
+    def _clean_code_blocks(text: str) -> str:
+        """Clean code blocks and preserve their content"""
+        # Remove markdown code block markers but keep content
+        text = re.sub(r'```(?:json|python|html|javascript|js)?\n', '', text)
+        text = re.sub(r'```', '', text)
         
-        try:
-            # First try to convert recommendations format if present
-            if 'RECOMMENDATIONS:' in response_text:
-                logger.debug("Detected recommendations format")
-                response_text = cls._convert_recommendations_to_json(response_text)
-                
-            # Clean up JSON structure
-            cleaned_text = cls.preprocess_json(response_text)
-            
-            try:
-                # Parse and re-sanitize file contents
-                data = json.loads(cleaned_text)
-                if isinstance(data, dict) and 'files' in data:
-                    # Basic response data check without any validation requirements
-                    if detect_features:
-                        logger.debug("Feature detection active")
-                        
-                    # Store original file contents for before/after diff
-                    original_files = {}
-                    for file_path in data['files'].keys():
-                        original_files[file_path] = data['files'][file_path]
-                        
-                    # First sanitize individual file contents
-                    for file_path, content in data['files'].items():
-                        # Validate file path length and content
-                        if len(file_path) > 255:  # Standard filesystem limit
-                            logger.warning(f"File path too long, truncating: {file_path[:50]}...")
-                            continue
-                            
-                        # Clean and validate content
-                        cleaned_content = cls._sanitize_file_content(content)
-                        if cleaned_content:
-                            data['files'][file_path] = cleaned_content
-                        
-                    # Ensure file content completeness using dynamic AI assistance
-                    if detect_features:
-                        data['files'] = await cls.ensure_complete_file_content(data['files'], request_text)
-                        
-                        # Track changes for diffing
-                        if 'original_files' not in data:
-                            data['original_files'] = {}
-                            
-                        # Store original versions of files for diff
-                        for file_path, new_content in data['files'].items():
-                            if file_path in original_files and original_files[file_path] != new_content:
-                                logger.debug(f"Tracking file changes for: {file_path}")
-                                data['original_files'][file_path] = original_files[file_path]
-                        
-                cleaned_text = json.dumps(data)
-                logger.debug("Successfully sanitized and validated JSON structure")
-                return cleaned_text
-            except json.JSONDecodeError as e:
-                logger.error("Error in JSON validation: %s", str(e))
-                logger.error("Problematic JSON:\n%s", cleaned_text[:200])
-                cls._debug_json_error(cleaned_text, e)
-                return ""
-                
-        except Exception as e:
-            logger.error("Error in sanitize_ai_response: %s", str(e))
-            logger.error(traceback.format_exc())
-            return ""
-
-    @staticmethod
-    def _remove_markdown_markers(text: str) -> str:
-        """Remove markdown markers from the text"""
-        logger.debug("=== Removing Markdown Markers ===")
-        logger.debug("Original text starts with: %s", text[:50])
+        # Remove RESPONSE: prefix if present
+        text = re.sub(r'^RESPONSE:\s*', '', text.strip())
         
-        # Remove --- markers and surrounding whitespace
-        cleaned = re.sub(r'\n*---\n*', '', text)
+        # Find the actual JSON content
+        json_start = text.find('{')
+        json_end = text.rfind('}')
+        if json_start >= 0 and json_end > json_start:
+            text = text[json_start:json_end + 1]
         
-        # Remove "RESPONSE:" or similar prefixes before JSON content
-        if '{' in cleaned:
-            json_start = cleaned.find('{')
-            if json_start > 0:
-                prefix_text = cleaned[:json_start].strip()
-                if prefix_text and not prefix_text.endswith(':'): # Not a JSON key
-                    logger.debug("Removing prefix before JSON: %s", prefix_text)
-                    cleaned = cleaned[json_start:]
-        
-        logger.debug("Text after removing markers starts with: %s", cleaned[:50])
-        return cleaned
-
-    @staticmethod
-    def _fix_escape_sequences(text: str) -> str:
-        """Fix invalid escape sequences in JSON strings"""
-        logger.debug("=== Fixing Escape Sequences ===")
-        logger.debug("Processing text with length: %d", len(text))
-        
-        try:
-            # Track string boundaries and escape status
-            in_string = False
-            escaped = False
-            result = []
-            i = 0
-            
-            while i < len(text):
-                char = text[i]
-                
-                if char == '"' and not in_string:
-                    in_string = not in_string
-                    result.append(char)
-                elif char == '\\':
-                    if escaped:
-                        # Double backslash - keep both
-                        result.append('\\\\')
-                        escaped = False
-                    else:
-                        escaped = True
-                        # Don't append yet - wait to see next char
-                elif escaped:
-                    # Handle escape sequences
-                    valid_escapes = {'n', 'r', 't', '"', '/', 'b', 'f'}
-                    if char in valid_escapes:
-                        result.append('\\' + char)
-                    else:
-                        # Invalid escape - escape the backslash itself
-                        logger.debug("Found invalid escape sequence: \\%s at position %d", char, i)
-                        result.append('\\\\' + char)
-                    escaped = False
-                else:
-                    result.append(char)
-                i += 1
-                
-            if escaped:  # Handle trailing backslash
-                result.append('\\\\')
-                
-            processed = ''.join(result)
-            logger.debug("Fixed escape sequences. Sample of result: %s", processed[:100])
-            return processed
-            
-        except Exception as e:
-            logger.error("Error fixing escape sequences: %s", str(e))
-            logger.error("Error context - text sample: %s", text[:100])
-            return text
-
-    @staticmethod
-    def _debug_escape_sequences(text: str, error_pos: int = None):
-        """Debug helper for escape sequence issues"""
-        logger.debug("=== Debug Escape Sequences ===")
-        if error_pos:
-            start = max(0, error_pos - 20)
-            end = min(len(text), error_pos + 20)
-            context = text[start:end]
-            pointer = " " * (min(20, error_pos - start)) + "^"
-            logger.debug("Context around error:")
-            logger.debug(context)
-            logger.debug(pointer)
-            
-        # Find and log all escape sequences
-        escapes = re.finditer(r'\\(.)', text)
-        for match in escapes:
-            pos = match.start()
-            seq = match.group(0)
-            char = match.group(1)
-            logger.debug("Escape sequence at pos %d: %s (char: %s)", pos, seq, char)
+        return text.strip()
 
     @staticmethod
     def _debug_json_structure(text: str, stage: str):
@@ -1139,58 +1143,3 @@ Return the complete, valid file content with proper structure."""
             logger.error(f"Error resolving view path: {str(e)}")
             logger.error(traceback.format_exc())
             return None
-
-    @staticmethod
-    def _debug_feature_detection(content: str, patterns: List[str]):
-        """Debug helper for feature detection"""
-        logger.debug("=== Feature Detection Analysis ===")
-        logger.debug(f"Content length: {len(content)}")
-        logger.debug("First 100 chars:\n%s", content[:100])
-        
-        for pattern in patterns:
-            matches = re.finditer(pattern, content, re.IGNORECASE)
-            for match in matches:
-                logger.debug(f"Pattern '{pattern}' matched: {match.group(0)}")
-                context_start = max(0, match.start() - 50)
-                context_end = min(len(content), match.end() + 50)
-                logger.debug(f"Match context:\n{content[context_start:context_end]}")
-
-    @staticmethod
-    def _debug_structure_validation(file_path: str, content: str, file_type: str):
-        """Debug helper for structure validation"""
-        logger.debug("\n=== Structure Validation Analysis ===")
-        logger.debug(f"File: {file_path}")
-        logger.debug(f"Type: {file_type}")
-        logger.debug(f"Content length: {len(content)}")
-        logger.debug("First 100 chars:\n%s", content[:100])
-        
-        # Check for common structural elements
-        if file_type == "python":
-            imports = re.findall(r'^import\s+.*$|^from\s+.*\s+import\s+.*$', content, re.MULTILINE)
-            classes = re.findall(r'^class\s+\w+.*:$', content, re.MULTILINE)
-            functions = re.findall(r'^def\s+\w+\s*\(.*\):$', content, re.MULTILINE)
-            
-            logger.debug("Python structure:")
-            logger.debug(f"- Imports: {len(imports)}")
-            logger.debug(f"- Classes: {len(classes)}")
-            logger.debug(f"- Functions: {len(functions)}")
-            
-        elif file_type == "template":
-            extends = re.findall(r'{%\s*extends\s+[\'"].*?[\'"]\s*%}', content)
-            blocks = re.findall(r'{%\s*block\s+\w+\s*%}', content)
-            includes = re.findall(r'{%\s*include\s+[\'"].*?[\'"]\s*%}', content)
-            
-            logger.debug("Template structure:")
-            logger.debug(f"- Extends: {len(extends)}")
-            logger.debug(f"- Blocks: {len(blocks)}")
-            logger.debug(f"- Includes: {len(includes)}")
-            
-        elif file_type == "javascript":
-            functions = re.findall(r'function\s+\w+\s*\(.*?\)', content)
-            classes = re.findall(r'class\s+\w+\s*{', content)
-            imports = re.findall(r'import\s+.*?from\s+[\'"].*?[\'"]\s*;?', content)
-            
-            logger.debug("JavaScript structure:")
-            logger.debug(f"- Functions: {len(functions)}")
-            logger.debug(f"- Classes: {len(classes)}")
-            logger.debug(f"- Imports: {len(imports)}")

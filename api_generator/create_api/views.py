@@ -1,7 +1,7 @@
 # create_api/views.py
 
 from django.forms import ValidationError
-from django.http import Http404,HttpResponseServerError
+from django.http import Http404,HttpResponseServerError, HttpResponse
 from rest_framework import generics, viewsets, status
 from django.contrib.auth.models import User
 from rest_framework.response import Response
@@ -49,6 +49,17 @@ from datetime import timedelta
 from django.db.models import Count
 from django.db.models.functions import TruncDate
 import json
+import re
+import os
+import traceback
+from core.services.file_indexer import FileIndexer
+from django.template import Engine, RequestContext, TemplateDoesNotExist, Context
+from django.templatetags.static import static as static_tag
+from django.template import engines
+from django.contrib.auth.mixins import LoginRequiredMixin
+from django.views.decorators.http import require_GET
+from rest_framework_simplejwt.authentication import JWTAuthentication
+from django.core.cache import cache
 
 logger = logging.getLogger(__name__)
 
@@ -1783,8 +1794,8 @@ def generate_diff_data(project_id, change_id, preview_alias, raw_label, modified
     # Prepare files array for DiffModal
     files = []
     for path in modified_files:
-        # Original content
-        original_content = FileIndexer.get_content(path) or ''
+        # Original content - use FileIndexer with project_id
+        original_content = FileIndexer.get_content(project_id, path) or ''
         
         # Updated content - make sure we're getting the complete file, not just changes
         if path in diff:
@@ -1831,93 +1842,332 @@ import json
 from django.http import HttpResponse
 def apply_changes_to_project(project_id, change_id):
     """
-    Save all modified files from AIChangeRequest to the project's database.
+    Apply the changes from the AIChangeRequest to the actual project files
     """
+    # Get the change request
     change = AIChangeRequest.objects.get(id=change_id, project_id=project_id)
-    diff = json.loads(change.diff)
-    app_name = change.app_name.split('_', 2)[2] if '_' in change.app_name else change.app_name
+    logger.info(f"Applying changes from request {change_id} to project {project_id}")
     
-    file_models = {
-        'model': ModelFile,
-        'view': ViewFile,
-        'form': FormFile,
-        'template': TemplateFile,
-        'static': StaticFile,
-        'app': AppFile,
-        'settings': SettingsFile,
-        'url': URLFile,
-        'project': ProjectFile,
-        'media': MediaFile
-    }
+    # Parse the request's diff data - handle both new and old formats
+    try:
+        diff_data = json.loads(change.diff)
+    except json.JSONDecodeError:
+        logger.error(f"Invalid JSON in diff data for change_id {change_id}")
+        return
     
-    with transaction.atomic():
-        for path, content in diff.items():
-            # Normalize template paths
-            if path.startswith('templates/'):
-                path = path.replace('templates/', '', 1)
-                file_type = 'template'
-            else:
-                # Determine file type and app
-                parts = path.split('/')
-                file_type = None
-                if len(parts) > 1 and parts[0] in App.objects.filter(project_id=project_id).values_list('name', flat=True):
-                    app_name_from_path = parts[0]
-                    app = App.objects.get(project_id=project_id, name=app_name_from_path)
-                    rel_path = '/'.join(parts[1:])
+    # Check diff structure - could be either:
+    # 1. { file_path: content } or 
+    # 2. { file_path: { before: "...", after: "..." } } or
+    # 3. { files: { file_path: content } }
+    
+    if 'files' in diff_data and isinstance(diff_data['files'], dict):
+        # Format 3 - extract the files dictionary
+        files_to_update = diff_data['files']
+    else:
+        # Format 1 or 2 - use as is
+        files_to_update = diff_data
+    
+    logger.info(f"Found {len(files_to_update)} files to update")
+    
+    # Apply each file's changes
+    for file_path, file_data in files_to_update.items():
+        try:
+            # Extract the final content based on format
+            if isinstance(file_data, dict):
+                # Format 2 - check for 'after' key
+                if 'after' in file_data:
+                    final_content = file_data['after']
+                elif 'preview' in file_data and isinstance(file_data['preview'], dict) and 'after' in file_data['preview']:
+                    final_content = file_data['preview']['after']
+                elif 'content' in file_data:
+                    final_content = file_data['content']
                 else:
-                    rel_path = path
-                    
-                # Match file type
-                for type_key, model_class in file_models.items():
-                    if change.file_type == type_key or path.endswith(('.py', '.html', '.css', '.js')):
-                        file_type = type_key
-                        break
+                    # No content found, log and skip
+                    logger.warning(f"No content found for {file_path} in expected format")
+                    continue
+            else:
+                # Format 1 - direct content
+                final_content = file_data
             
-            model = file_models.get(file_type, AppFile)  # Fallback to AppFile for unknown types
+            # Check for marker areas and process them
+            has_markers = ('<!-- DJANGO-AI-ADD-START -->' in final_content or 
+                          '<!-- DJANGO-AI-REMOVE-START -->' in final_content or
+                          '# DJANGO-AI-ADD-START' in final_content or
+                          '# DJANGO-AI-REMOVE-START' in final_content)
             
-            # Update or create file
-            defaults = {'content': content, 'project_id': project_id}
-            if app:
-                defaults['app'] = app
+            if has_markers:
+                logger.info(f"Processing marker changes for {file_path}")
+                final_content = process_marker_changes(final_content, file_path)
             
-            try:
-                obj = model.objects.update_or_create(
+            # Normalize file path for templates
+            if file_path.startswith('templates/'):
+                template_path = file_path.replace('templates/', '')
+                logger.info(f"Handling template file at normalized path: {template_path}")
+                
+                try:
+                    # Try to find an existing template
+                    template = TemplateFile.objects.get(project_id=project_id, path=template_path)
+                    template.content = final_content
+                    template.save()
+                    logger.info(f"Updated existing template: {template_path}")
+                except TemplateFile.DoesNotExist:
+                    # Create new template file
+                    template = TemplateFile(
                     project_id=project_id,
-                    path=path,
-                    defaults=defaults
-                )[0]
-                logger.debug(f"Saved {model.__name__}: {path}")
-            except Exception as e:
-                logger.error(f"Error saving {path}: {str(e)}")
-                continue
-        
-        # Mark change as applied
-        change.status = 'applied'
-        change.save()
+                        path=template_path,
+                        name=os.path.basename(template_path),
+                        content=final_content
+                    )
+                    template.save()
+                    logger.info(f"Created new template: {template_path}")
+            
+            # Handle Python app files
+            elif file_path.endswith('.py'):
+                # Determine app name from path
+                path_parts = file_path.split('/')
+                if len(path_parts) >= 2:
+                    app_name = path_parts[0]
+                    file_name = path_parts[-1]
+                    logger.info(f"Processing Python file {file_name} for app {app_name}")
+                    
+                    try:
+                        app = App.objects.get(project_id=project_id, name=app_name)
+                        
+                        # Handle views.py
+                        if file_name == 'views.py':
+                            try:
+                                view_file = ViewFile.objects.get(app=app)
+                                view_file.content = final_content
+                                view_file.save()
+                                logger.info(f"Updated existing view file for app {app_name}")
+                            except ViewFile.DoesNotExist:
+                                view_file = ViewFile(
+                                    app=app,
+                                    project_id=project_id,
+                                    name='views.py',
+                                    content=final_content,
+                                    path=file_path
+                                )
+                                view_file.save()
+                                logger.info(f"Created new view file for app {app_name}")
+                        
+                        # Handle models.py
+                        elif file_name == 'models.py':
+                            try:
+                                model_file = ModelFile.objects.get(app=app)
+                                model_file.content = final_content
+                                model_file.save()
+                                logger.info(f"Updated existing model file for app {app_name}")
+                            except ModelFile.DoesNotExist:
+                                model_file = ModelFile(
+                                    app=app,
+                                    project_id=project_id,
+                                    name='models.py',
+                                    content=final_content,
+                                    path=file_path
+                                )
+                                model_file.save()
+                                logger.info(f"Created new model file for app {app_name}")
+                        
+                        # Handle forms.py
+                        elif file_name == 'forms.py':
+                            try:
+                                form_file = FormFile.objects.get(app=app)
+                                form_file.content = final_content
+                                form_file.save()
+                                logger.info(f"Updated existing form file for app {app_name}")
+                            except FormFile.DoesNotExist:
+                                form_file = FormFile(
+                                    app=app,
+                                    project_id=project_id,
+                                    name='forms.py',
+                                    content=final_content,
+                                    path=file_path
+                                )
+                                form_file.save()
+                                logger.info(f"Created new form file for app {app_name}")
+                        
+                        # Handle urls.py in app
+                        elif file_name == 'urls.py':
+                            try:
+                                url_file = URLFile.objects.get(app=app)
+                                url_file.content = final_content
+                                url_file.save()
+                                logger.info(f"Updated existing URL file for app {app_name}")
+                            except URLFile.DoesNotExist:
+                                url_file = URLFile(
+                                    app=app,
+                                    project_id=project_id,
+                                    name='urls.py',
+                                    content=final_content,
+                                    path=file_path
+                                )
+                                url_file.save()
+                                logger.info(f"Created new URL file for app {app_name}")
+                        
+                        # Handle other app files
+                        else:
+                            try:
+                                app_file = AppFile.objects.get(app=app, path=file_path)
+                                app_file.content = final_content
+                                app_file.save()
+                                logger.info(f"Updated existing app file: {file_path}")
+                            except AppFile.DoesNotExist:
+                                app_file = AppFile(
+                                    app=app,
+                                    project_id=project_id,
+                                    name=os.path.basename(file_path),
+                                    content=final_content,
+                                    path=file_path
+                                )
+                                app_file.save()
+                                logger.info(f"Created new app file: {file_path}")
+                    
+                    except App.DoesNotExist:
+                        logger.error(f"App not found: {app_name}")
+                        # Handle case where app doesn't exist
+                        # Could create app or use default app if needed
+                else:
+                    # Handle project-level Python files like settings.py and urls.py
+                    file_name = os.path.basename(file_path)
+                    
+                    if file_name == 'settings.py':
+                        try:
+                            settings_file = SettingsFile.objects.get(project_id=project_id, name=file_name)
+                            settings_file.content = final_content
+                            settings_file.save()
+                            logger.info(f"Updated existing settings file: {file_path}")
+                        except SettingsFile.DoesNotExist:
+                            settings_file = SettingsFile(
+                                project_id=project_id,
+                                name=file_name,
+                                content=final_content,
+                                path=file_path
+                            )
+                            settings_file.save()
+                            logger.info(f"Created new settings file: {file_path}")
+                    
+                    elif file_name == 'urls.py':
+                        try:
+                            url_file = URLFile.objects.get(project_id=project_id, app=None, name=file_name)
+                            url_file.content = final_content
+                            url_file.save()
+                            logger.info(f"Updated existing project URL file: {file_path}")
+                        except URLFile.DoesNotExist:
+                            url_file = URLFile(
+                                project_id=project_id,
+                                app=None,
+                                name=file_name,
+                                content=final_content,
+                                path=file_path
+                            )
+                            url_file.save()
+                            logger.info(f"Created new project URL file: {file_path}")
+                    
+                    else:
+                        try:
+                            project_file = ProjectFile.objects.get(project_id=project_id, path=file_path)
+                            project_file.content = final_content
+                            project_file.save()
+                            logger.info(f"Updated existing project file: {file_path}")
+                        except ProjectFile.DoesNotExist:
+                            project_file = ProjectFile(
+                                project_id=project_id,
+                                name=os.path.basename(file_path),
+                                content=final_content,
+                                path=file_path
+                            )
+                            project_file.save()
+                            logger.info(f"Created new project file: {file_path}")
+            
+            # Handle static files (CSS/JS)
+            elif file_path.endswith(('.css', '.js')) or file_path.startswith('static/'):
+                normalized_path = file_path
+                if file_path.startswith('static/'):
+                    normalized_path = file_path[7:]  # Remove 'static/' prefix
+                
+                file_type = 'css' if file_path.endswith('.css') else 'js' if file_path.endswith('.js') else 'other'
+                
+                try:
+                    static_file = StaticFile.objects.get(project_id=project_id, path=normalized_path)
+                    static_file.content = final_content
+                    static_file.save()
+                    logger.info(f"Updated existing static file: {normalized_path}")
+                except StaticFile.DoesNotExist:
+                    # Create the file
+                    static_file = StaticFile(
+                        project_id=project_id,
+                        path=normalized_path,
+                        name=os.path.basename(normalized_path),
+                        content=final_content,
+                        file_type=file_type
+                    )
+                    static_file.save()
+                    logger.info(f"Created new static file: {normalized_path}")
+            
+            # Handle media files
+            elif file_path.startswith('media/'):
+                # Media files are typically binary, so we don't update content directly
+                # We'd need to handle file uploads separately
+                logger.info(f"Media file changes detected but not implemented: {file_path}")
+            
+            # Handle other files
+            else:
+                logger.info(f"Unhandled file type for path: {file_path}")
+                # Create as a project file
+                try:
+                    project_file = ProjectFile.objects.get(project_id=project_id, path=file_path)
+                    project_file.content = final_content
+                    project_file.save()
+                    logger.info(f"Updated existing project file: {file_path}")
+                except ProjectFile.DoesNotExist:
+                    project_file = ProjectFile(
+                        project_id=project_id,
+                        name=os.path.basename(file_path),
+                        content=final_content,
+                        path=file_path
+                    )
+                    project_file.save()
+                    logger.info(f"Created new project file: {file_path}")
+        except Exception as e:
+            logger.error(f"Error applying changes to {file_path}: {e}")
+            logger.error(traceback.format_exc())
+            
+    # Mark the change request as applied
+    change.status = 'applied'
+    change.save()
+    logger.info(f"Change request {change_id} marked as applied")
+    
+    return True
 
 
 class ApplyChangesAPIView(APIView):
     def post(self, request, project_id, change_id):
         try:
-            apply_changes_to_project(project_id, change_id)
-            return Response({"message": "Changes applied successfully"}, status=status.HTTP_200_OK)
+            # Get the change request
+            change = get_object_or_404(
+                AIChangeRequest.objects.filter(
+                    project_id=project_id,
+                    id=change_id
+                )
+            )
+            
+            # Call the apply_changes_to_project function with marker processing
+            result = apply_changes_to_project(project_id, change_id)
+            
+            if result:
+                return Response({"message": "Changes applied successfully"}, status=status.HTTP_200_OK)
+            else:
+                return Response({"error": "Error applying changes"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+                
         except AIChangeRequest.DoesNotExist:
             logger.error(f"AIChangeRequest {change_id} not found for project {project_id}")
             return Response({"error": "ChangeRequest not found"}, status=status.HTTP_404_NOT_FOUND)
         except Exception as e:
             logger.error(f"Error applying changes: {e}")
+            logger.error(traceback.format_exc())
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-import traceback
-import os
-from core.services.file_indexer import FileIndexer
-from django.template import Engine, RequestContext, TemplateDoesNotExist, Context
-from django.templatetags.static import static as static_tag
-from django.template import engines
-from django.contrib.auth.mixins import LoginRequiredMixin
-from django.views.decorators.http import require_GET
-# ————————————————————————————————————————————————————————————————————————————
-# 1) Simple "preview_view" for any file type (just dumps raw or patched content)
-# ————————————————————————————————————————————————————————————————————————————
+
 @require_GET
 @csrf_exempt
 def preview_view(request, project_id):
@@ -1940,9 +2190,17 @@ def preview_view(request, project_id):
             # Get new content from diff
             diff_data = json.loads(change.diff or "{}")
             
+            # Normalize diff data structure - we handle several formats
+            if 'files' in diff_data and isinstance(diff_data['files'], dict):
+                # Format 3: { files: { file_path: content } }
+                files_to_check = diff_data['files']
+            else:
+                # Format 1 or 2: { file_path: content } or { file_path: { before/after } }
+                files_to_check = diff_data
+            
             # Check if file is in the diff and has content
-            if file_path in diff_data:
-                file_data = diff_data[file_path]
+            if file_path in files_to_check:
+                file_data = files_to_check[file_path]
                 # Extract content depending on structure
                 if isinstance(file_data, str):
                     content = file_data
@@ -1962,6 +2220,17 @@ def preview_view(request, project_id):
                     
                     if not content:
                         logger.warning(f"Could not extract content from diff data for {file_path}: {file_data.keys()}")
+            
+            # Process the content to remove any markers
+            if content:
+                has_markers = ('<!-- DJANGO-AI-ADD-START -->' in content or 
+                               '<!-- DJANGO-AI-REMOVE-START -->' in content or
+                               '# DJANGO-AI-ADD-START' in content or
+                               '# DJANGO-AI-REMOVE-START' in content)
+                
+                if has_markers:
+                    logger.info(f"Processing marker changes for preview of {file_path}")
+                    content = process_marker_changes(content, file_path)
         
         # If content is still None, try getting original content for "before" mode or as fallback
         if content is None:
@@ -2027,99 +2296,89 @@ def preview_view(request, project_id):
         logger.error(traceback.format_exc())
         return HttpResponse(status=500, content=f"Error: {str(e)}")
 
-    except AIChangeRequest.DoesNotExist:
-        logger.error(f"AIChangeRequest not found: pk={change_id}, project_id={project_id}")
-        return HttpResponse(status=404)
-    except Exception as e:
-        logger.exception(f"Error in preview_view: {str(e)}")
-        return HttpResponseServerError(f"Server error: {str(e)}")
-
-    except AIChangeRequest.DoesNotExist:
-        logger.error(f"AIChangeRequest not found: pk={change_id}, project_id={project_id}")
-        return HttpResponse(status=404)
-    except Exception as e:
-        logger.exception(f"Error in preview_view: {str(e)}")
-        return HttpResponseServerError(f"Server error: {str(e)}")
-
-
-# ————————————————————————————————————————————————————————————————————————————
-# 2) "PreviewOneView" that actually renders via the real template engine
-# ————————————————————————————————————————————————————————————————————————————
-from rest_framework_simplejwt.authentication import JWTAuthentication
-# core/views.py
-
-from rest_framework_simplejwt.authentication import JWTAuthentication
-from django.template import engines
-from django.core.cache import cache
-
-class PreviewOneView(APIView):
-    def get(self, request, project_id, change_id):
-        file_path = request.GET.get("file")
-        mode = request.GET.get("mode", "after")
-
-        if not file_path:
-            return Response({"error": "Missing file parameter"}, status=400)
-
+@sync_to_async
+def setup_preview_project(project_id, preview_alias, raw_label, change_id=None):
+    """
+    Set up a preview project with optional AI changes.
+    
+    Args:
+        project_id (int): The ID of the project to preview
+        preview_alias (str): The alias for the preview database
+        raw_label (str): The raw label for the app
+        change_id (int, optional): The ID of the AI change request to apply
+    
+    Returns:
+        list: A list of modified file paths
+    """
+    try:
+        # Get the project
         try:
-            change = AIChangeRequest.objects.get(id=change_id, project_id=project_id)
-            raw_label = change.app_name.lower()
-            preview_dir = os.path.join(
-                settings.PREVIEW_ROOT,
-                "dynamic_apps_preview",
-                f"preview_{project_id}_after_{change_id}_{raw_label}"
-            )
-            # Configure template engine to prioritize preview directory
-            engine = Engine(dirs=[preview_dir], app_dirs=True, debug=True)
-            engines['django'] = engine
+            project = Project.objects.get(id=project_id)
+        except Project.DoesNotExist:
+            logger.error(f"Project {project_id} not found")
+            raise Http404(f"Project {project_id} not found")
 
-            diff = json.loads(change.diff or "{}")
-            patched_content = diff.get(file_path)
-
-            context = {"request": request, "user": request.user, "posts": []}
-
-            if file_path.endswith(".html"):
-                if mode == "before" or not patched_content:
-                    try:
-                        template = engine.get_template(file_path.replace("templates/", "") if file_path.startswith("templates/") else file_path)
-                        rendered = template.render(context, request)
-                        return HttpResponse(rendered, content_type="text/html")
-                    except TemplateDoesNotExist:
-                        return Response({"error": "Template not found"}, status=404)
+        # Get AI changes if change_id provided
+        modified_files = []
+        if change_id:
+            try:
+                change = AIChangeRequest.objects.get(id=change_id)
+                diff = json.loads(change.diff or "{}")
+                
+                # Process the diff data based on its structure
+                if 'files' in diff and isinstance(diff['files'], dict):
+                    files_to_check = diff['files']
                 else:
-                    template = engine.from_string(patched_content)
-                    rendered = template.render(context, request)
-                    return HttpResponse(rendered, content_type="text/html")
-            else:
-                # Handle static files
-                if mode == "before":
-                    try:
-                        static_file = StaticFile.objects.get(project_id=project_id, path=file_path)
-                        content = static_file.content or ""
-                    except StaticFile.DoesNotExist:
-                        logger.warning(f"StaticFile not found: project_id={project_id}, path={file_path}")
-                        return Response({"error": "Static file not found"}, status=404)
-                else:
-                    content = patched_content or ""
-                    if not content:
-                        try:
-                            static_file = StaticFile.objects.get(project_id=project_id, path=file_path)
-                            content = static_file.content or ""
-                        except StaticFile.DoesNotExist:
-                            logger.warning(f"StaticFile not found: project_id={project_id}, path={file_path}")
-                            return Response({"error": "Static file not found"}, status=404)
+                    files_to_check = diff
+                
+                # Collect modified files
+                for file_path, changes in files_to_check.items():
+                    if isinstance(changes, dict) and "after" in changes.get("preview", {}):
+                        modified_files.append(file_path)
+                    elif isinstance(changes, dict) and "after" in changes:
+                        modified_files.append(file_path)
+                    else:
+                        modified_files.append(file_path)
+                        
+            except AIChangeRequest.DoesNotExist:
+                logger.error(f"Change request {change_id} not found")
+                raise Http404(f"Change request {change_id} not found")
+            except Exception as e:
+                logger.error(f"Error applying changes: {str(e)}")
+                raise
 
-                if os.path.exists(os.path.join(preview_dir, file_path)):
-                    with open(os.path.join(preview_dir, file_path), "r", encoding="utf-8") as f:
-                        content = f.read()
-                    logger.debug(f"Loaded content from preview directory: {os.path.join(preview_dir, file_path)}")
+        return modified_files
 
-                return HttpResponse(content, content_type="text/plain")
+    except Exception as e:
+        logger.error(f"Error in setup_preview_project: {str(e)}")
+        raise
+
+class CancelChangesAPIView(APIView):
+    def post(self, request, project_id, change_id):
+        try:
+            # Get the change request
+            change_request = AIChangeRequest.objects.get(id=change_id, project_id=project_id)
+            
+            # Update the status to cancelled
+            change_request.status = 'cancelled'
+            change_request.save()
+            
+            # If there's an associated conversation, update its status
+            if hasattr(change_request, 'conversation') and change_request.conversation:
+                change_request.conversation.status = 'cancelled'
+                change_request.conversation.save()
+            
+            # Note: We don't directly call preview_manager.cleanup_preview here
+            # to avoid circular imports. The cleanup can be handled elsewhere or
+            # through a signal/event system.
+            
+            return Response({"message": "Changes cancelled successfully"}, status=status.HTTP_200_OK)
 
         except AIChangeRequest.DoesNotExist:
-            return Response({"error": "ChangeRequest not found"}, status=404)
+            return Response({"error": "Change request not found"}, status=status.HTTP_404_NOT_FOUND)
         except Exception as e:
-            logger.exception(f"Error in PreviewOneView: {str(e)}")
-            return Response({"error": str(e)}, status=500)
+            logger.error(f"Error cancelling changes: {e}")
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 @require_GET
 def preview_project(request, project_id):
@@ -2150,8 +2409,20 @@ def preview_project(request, project_id):
             try:
                 change = AIChangeRequest.objects.get(id=change_id)
                 diff_data = json.loads(change.diff or '{}')
+                
+                # Process any marker-based changes
+                processed_diff = {}
+                for file_path, content in diff_data.items():
+                    if isinstance(content, str) and ('<!-- DJANGO-AI-ADD-START -->' in content or 
+                                               '<!-- DJANGO-AI-REMOVE-START -->' in content or
+                                               '# DJANGO-AI-ADD-START' in content or
+                                               '# DJANGO-AI-REMOVE-START' in content):
+                        processed_diff[file_path] = process_marker_changes(content, file_path)
+                    else:
+                        processed_diff[file_path] = content
+                        
                 context['change'] = change
-                context['diff_data'] = diff_data
+                context['diff_data'] = processed_diff
             except AIChangeRequest.DoesNotExist:
                 logger.error(f"Change {change_id} not found")
                 return JsonResponse({'error': 'Change not found'}, status=404)
@@ -2172,7 +2443,7 @@ def preview_project(request, project_id):
         logger.error(traceback.format_exc())
         return JsonResponse({'error': str(e)}, status=500)
 
-def preview_project(request, project_id, preview_alias, raw_label, ai_diff_code=None):
+def preview_project_with_alias(request, project_id, preview_alias, raw_label, ai_diff_code=None):
     """
     Preview a project's current state or a specific change.
     
@@ -2204,7 +2475,19 @@ def preview_project(request, project_id, preview_alias, raw_label, ai_diff_code=
             try:
                 # Parse the diff code
                 diff_data = json.loads(ai_diff_code)
-                context['diff_data'] = diff_data
+                
+                # Process any marker-based changes
+                processed_diff = {}
+                for file_path, content in diff_data.items():
+                    if isinstance(content, str) and ('<!-- DJANGO-AI-ADD-START -->' in content or 
+                                               '<!-- DJANGO-AI-REMOVE-START -->' in content or
+                                               '# DJANGO-AI-ADD-START' in content or
+                                               '# DJANGO-AI-REMOVE-START' in content):
+                        processed_diff[file_path] = process_marker_changes(content, file_path)
+                    else:
+                        processed_diff[file_path] = content
+                        
+                context['diff_data'] = processed_diff
                 
                 # Apply changes to preview database
                 with transaction.atomic(using=preview_alias):
@@ -2230,79 +2513,101 @@ def preview_project(request, project_id, preview_alias, raw_label, ai_diff_code=
         logger.error(f"Error in preview_project: {str(e)}")
         logger.error(traceback.format_exc())
         return JsonResponse({'error': str(e)}, status=500)
-@sync_to_async
-def setup_preview_project(project_id, preview_alias, raw_label, change_id=None):
-    """
-    Set up a preview project with optional AI changes.
-    
-    Args:
-        project_id (int): The ID of the project to preview
-        preview_alias (str): The alias for the preview database
-        raw_label (str): The raw label for the app
-        change_id (int, optional): The ID of the AI change request to apply
-    
-    Returns:
-        list: A list of modified file paths
-    """
-    try:
-        # Get the project
+
+class PreviewOneView(APIView):
+    def get(self, request, project_id, change_id):
+        file_path = request.GET.get("file")
+        mode = request.GET.get("mode", "after")
+
+        if not file_path:
+            return Response({"error": "Missing file parameter"}, status=400)
+
         try:
-            project = Project.objects.get(id=project_id)
-        except Project.DoesNotExist:
-            logger.error(f"Project {project_id} not found")
-            raise Http404(f"Project {project_id} not found")
+            change = AIChangeRequest.objects.get(id=change_id, project_id=project_id)
+            raw_label = change.app_name.lower()
+            preview_dir = os.path.join(
+                settings.PREVIEW_ROOT,
+                "dynamic_apps_preview",
+                f"preview_{project_id}_after_{change_id}_{raw_label}"
+            )
+            
+            # Configure template engine to prioritize preview directory
+            engine = Engine(dirs=[preview_dir], app_dirs=True, debug=True)
+            engines['django'] = engine
 
-        # Get AI changes if change_id provided
-        modified_files = []
-        if change_id:
-            try:
-                change = AIChangeRequest.objects.get(id=change_id)
-                diff = json.loads(change.diff or "{}")
-                for file_path, changes in diff.items():
-                    if "after" in changes.get("preview", {}):
-                        modified_files.append(file_path)
-            except AIChangeRequest.DoesNotExist:
-                logger.error(f"Change request {change_id} not found")
-                raise Http404(f"Change request {change_id} not found")
-            except Exception as e:
-                logger.error(f"Error applying changes: {str(e)}")
-                raise
+            diff = json.loads(change.diff or "{}")
+            
+            # Normalize diff data structure
+            files_to_check = {}
+            if 'files' in diff and isinstance(diff['files'], dict):
+                files_to_check = diff['files']
+            else:
+                files_to_check = diff
+                
+            patched_content = None
+            if file_path in files_to_check:
+                file_data = files_to_check[file_path]
+                # Extract content depending on structure
+                if isinstance(file_data, str):
+                    patched_content = file_data
+                elif isinstance(file_data, dict):
+                    if 'after' in file_data:
+                        patched_content = file_data['after']
+                    elif 'preview' in file_data and isinstance(file_data['preview'], dict) and 'after' in file_data['preview']:
+                        patched_content = file_data['preview']['after']
+                    elif 'content' in file_data:
+                        patched_content = file_data['content']
+            
+            # Process any markers in the content
+            if patched_content and ('<!-- DJANGO-AI-ADD-START -->' in patched_content or 
+                                  '<!-- DJANGO-AI-REMOVE-START -->' in patched_content or
+                                  '# DJANGO-AI-ADD-START' in patched_content or
+                                  '# DJANGO-AI-REMOVE-START' in patched_content):
+                patched_content = process_marker_changes(patched_content, file_path)
 
-        return modified_files
+            context = {"request": request, "user": request.user, "posts": []}
 
-    except Exception as e:
-        logger.error(f"Error in setup_preview_project: {str(e)}")
-        raise
+            if file_path.endswith(".html"):
+                if mode == "before" or not patched_content:
+                    try:
+                        template = engine.get_template(file_path.replace("templates/", "") if file_path.startswith("templates/") else file_path)
+                        rendered = template.render(Context(context))
+                        return HttpResponse(rendered, content_type="text/html")
+                    except TemplateDoesNotExist:
+                        return Response({"error": "Template not found"}, status=404)
+                else:
+                    template = engine.from_string(patched_content)
+                    rendered = template.render(Context(context))
+                    return HttpResponse(rendered, content_type="text/html")
+            else:
+                # Handle static files
+                content = ""
+                if mode == "before":
+                    try:
+                        static_file = StaticFile.objects.get(project_id=project_id, path=file_path)
+                        content = static_file.content or ""
+                    except StaticFile.DoesNotExist:
+                        logger.warning(f"StaticFile not found: project_id={project_id}, path={file_path}")
+                        return Response({"error": "Static file not found"}, status=404)
+                else:
+                    content = patched_content or ""
+                    if not content:
+                        try:
+                            static_file = StaticFile.objects.get(project_id=project_id, path=file_path)
+                            content = static_file.content or ""
+                        except StaticFile.DoesNotExist:
+                            logger.warning(f"StaticFile not found: project_id={project_id}, path={file_path}")
+                            return Response({"error": "Static file not found"}, status=404)
 
-class CancelChangesAPIView(APIView):
-    def post(self, request, project_id, change_id):
-        try:
-            # Get the change request
-            change_request = AIChangeRequest.objects.get(id=change_id, project_id=project_id)
-            
-            # Update the status to cancelled
-            change_request.status = 'cancelled'
-            change_request.save()
-            
-            # If there's an associated conversation, update its status
-            if hasattr(change_request, 'conversation') and change_request.conversation:
-                change_request.conversation.status = 'cancelled'
-                change_request.conversation.save()
-            
-            # Clean up any preview instances
-            try:
-                before_alias = f"preview_{project_id}_before_{change_id}"
-                after_alias = f"preview_{project_id}_after_{change_id}"
-                preview_manager.cleanup_preview(before_alias)
-                preview_manager.cleanup_preview(after_alias)
-            except Exception as e:
-                logger.error(f"Error cleaning up previews: {e}")
-                # Continue despite preview cleanup errors
-            
-            return Response({"message": "Changes cancelled successfully"}, status=status.HTTP_200_OK)
-            
+                if os.path.exists(os.path.join(preview_dir, file_path)):
+                    with open(os.path.join(preview_dir, file_path), "r", encoding="utf-8") as f:
+                        content = f.read()
+                    logger.debug(f"Loaded content from preview directory: {os.path.join(preview_dir, file_path)}")
+
+                return HttpResponse(content, content_type="text/plain")
+
         except AIChangeRequest.DoesNotExist:
-            return Response({"error": "Change request not found"}, status=status.HTTP_404_NOT_FOUND)
+            return Response({"error": "ChangeRequest not found"}, status=404)
         except Exception as e:
-            logger.error(f"Error cancelling changes: {e}")
-            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            logger.exception(f"Error in PreviewOneView: {str(e)}")
+            return Response({"error": str(e)}, status=500)

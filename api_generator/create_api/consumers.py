@@ -49,6 +49,7 @@ from django.apps import apps
 import aiofiles
 from typing import Optional, List
 from django.core.files.base import ContentFile
+import re
 
 # Handle different WebSocket libraries
 try:
@@ -1499,7 +1500,7 @@ class ProjectConsumer(AsyncWebsocketConsumer):
             return TemporaryChangeRequest()
 
     async def send_diff_modal(self, change_id, diff, files, preview_content=None):
-        """Send diff modal with improved error handling and message queueing"""
+        """Send diff modal with marker areas to guide backend implementation"""
         try:
             # Parse the JSON data if needed
             diff_data = json.loads(diff) if isinstance(diff, str) else diff
@@ -1507,14 +1508,34 @@ class ProjectConsumer(AsyncWebsocketConsumer):
             # Format files data for the frontend
             formatted_files = []
             for file_path, file_data in diff_data['files'].items():
+                # Get original and modified content
+                before_content = file_data.get('before', '')
+                after_content = file_data.get('after', '')
+                
+                # Ensure proper formatting and cleanup
+                if isinstance(before_content, str):
+                    before_content = before_content.replace('\\n', '\n').replace('\\"', '"')
+                if isinstance(after_content, str):
+                    after_content = after_content.replace('\\n', '\n').replace('\\"', '"')
+                    # Remove any markdown code block markers
+                    after_content = re.sub(r'```[a-z]*\n', '', after_content)
+                    after_content = re.sub(r'```', '', after_content)
+                
+                # Include metadata about markers
+                has_markers = '<!-- DJANGO-AI-ADD-START -->' in after_content or \
+                            '<!-- DJANGO-AI-REMOVE-START -->' in after_content or \
+                            '# DJANGO-AI-ADD-START' in after_content or \
+                            '# DJANGO-AI-REMOVE-START' in after_content
+                
                 formatted_files.append({
                     'filePath': file_path,
-                    'before': file_data.get('before', ''),
-                    'after': file_data.get('after', ''),
+                    'before': before_content,
+                    'after': after_content,
                     'projectId': self.project_id,
                     'changeId': change_id,
                     'fileType': file_data.get('file_type'),
-                    'isNew': file_data.get('is_new', False)
+                    'isNew': file_data.get('is_new', False),
+                    'hasMarkers': has_markers
                 })
 
             # Generate preview URLs
@@ -1534,7 +1555,7 @@ class ProjectConsumer(AsyncWebsocketConsumer):
 
             # Try to send message with retries
             max_retries = 3
-            retry_delay = 1  # seconds
+            retry_delay = 1
             
             for attempt in range(max_retries):
                 try:
@@ -1563,8 +1584,8 @@ class ProjectConsumer(AsyncWebsocketConsumer):
         except Exception as e:
             logger.error(f"Error preparing diff modal: {str(e)}")
             logger.error(traceback.format_exc())
-            # Queue the message even if there was an error preparing it
-            if not self.is_closing:
+            # Ensure message_data is defined before attempting to queue it
+            if 'message_data' in locals() and not self.is_closing:
                 await self.message_queue.put(message_data)
 
     async def handle_analytics_request(self, data):
@@ -1951,9 +1972,9 @@ class ProjectConsumer(AsyncWebsocketConsumer):
             logger.error(traceback.format_exc())
 
     async def process_ai_response(self, response):
-        """Process AI response and send changes to client"""
+        """Process AI response and send changes to client with marker areas for backend implementation"""
         try:
-                        # Extract response data
+            # Extract response data
             logger.debug(f"Processing AI response: {str(response)[:200]}...")
             
             # Parse JSON if needed
@@ -1977,7 +1998,7 @@ class ProjectConsumer(AsyncWebsocketConsumer):
                 await self.send_error_safe("No file changes generated")
                 return
 
-            # Analyze the request to determine feature context - no hardcoding specific features
+            # Analyze the request to determine feature context
             feature_context = self._analyze_request_context(self.last_message) if hasattr(self, 'last_message') else {}
             logger.debug(f"Request feature context: {feature_context}")
 
@@ -1995,348 +2016,94 @@ class ProjectConsumer(AsyncWebsocketConsumer):
             if original_files:
                 logger.debug(f"Found {len(original_files)} original files for diffing")
             
-            # Categorize files to check if we have templates and views for analytics
-            template_files = []
-            view_files = []
-            static_files = []
-            
-            for file_path, content in files.items():
-                # Categorize files
-                if file_path.endswith('.html'):
-                    template_files.append(file_path)
-                elif 'views.py' in file_path or file_path.endswith('.py'):
-                    view_files.append(file_path)
-                elif file_path.startswith('static/'):
-                    static_files.append(file_path)
-                    
-            # Analyze template-view relationship to identify missing dependencies
-            if template_files and not view_files:
-                logger.info("Template files present but missing related view files - determining needed views")
+            # Process each file in the response
+            for file_path, file_content in files.items():
+                is_new_file = False
+                file_path = file_path.strip()
                 
-                # Analyze the request to determine what views are needed based on the templates
-                feature_context = self._analyze_request_context(self.last_message) if hasattr(self, 'last_message') else {}
-                template_features = []
-                
-                # Extract features from template files
-                for template_path in template_files:
-                    template_content = files.get(template_path, "")
-                    if isinstance(template_content, str):
-                        template_context = self._analyze_request_context(template_content)
-                        if template_context and 'features' in template_context:
-                            template_features.extend(template_context['features'])
-                
-                logger.debug(f"Detected template features: {template_features}")
-                
-                # Generate a dynamic context-aware analyzer prompt
-                context_analyzer_prompt = f"""
-You are a Django project structure analyzer. I need your help analyzing a feature request and determining what files are needed.
-
-PROJECT CONTEXT:
-- User request: "{self.last_message if hasattr(self, 'last_message') else ''}"
-- Files already generated: {template_files + static_files}
-- Detected features: {template_features}
-- Request keywords: {feature_context.get('keywords', [])}
-
-TASK:
-Your task is to determine:
-1. Does this request require server-side view logic?
-2. What is the appropriate Django app (directory) for these changes?
-3. What specific functionality is needed in the view?
-
-Return a JSON object with your analysis, specifying exactly what files are needed and why.
-"""
-                # Get project context first to use throughout the analysis
-                project_context = await self.get_project_context(self.project_id)
-                
-                # Get AI analysis of the needed view structure
-                context_analysis = ""
+                # Check if the file exists
                 try:
-                    context_analysis = await make_ai_api_call(
-                        prompt=context_analyzer_prompt,
-                        max_tokens=1000,
-                        temperature=0.2
-                    )
+                    original_content = await self.get_file_content(file_path, self.project_id)
+                    if original_content is None:
+                        # File doesn't exist, mark as new
+                        is_new_file = True
+                        original_content = ""
                 except Exception as e:
-                    logger.error(f"Error in context analysis: {str(e)}")
-                    
-                # Parse the analysis (even if plain text) to determine needs
-                needs_view = False
-                view_app = None
-                view_functionality = []
+                    logger.warning(f"Error retrieving original content for {file_path}: {str(e)}")
+                    original_content = original_files.get(file_path, "")
+                    is_new_file = not await self.file_exists(self.project_id, file_path)
                 
-                # Basic text analysis if not JSON
-                if context_analysis:
-                    logger.debug(f"Request context analysis received: {context_analysis[:200]}...")
+                # Normalize new content
+                if isinstance(file_content, dict):
+                    new_content = file_content.get('content', "")
+                else:
+                    new_content = file_content
                     
-                    if "need" in context_analysis.lower() and "view" in context_analysis.lower():
-                        needs_view = True
-                    
-                    # Extract app name dynamically from project context
-                    view_app = None
-                    
-                    # Get a list of app names dynamically from project context
-                    app_names = []
-                    if project_context and 'apps' in project_context:
-                        app_names = [app['name'] for app in project_context['apps']]
-                        logger.debug(f"Available apps from project context: {app_names}")
-                        
-                    # Check for any app names mentioned in the analysis
-                    if app_names:
-                        for app_name in app_names:
-                            if app_name.lower() in context_analysis.lower():
-                                view_app = app_name
-                                logger.debug(f"Found app name in context analysis: {app_name}")
-                                break
-                    
-                    # Default to first template's app if found
-                    if not view_app and template_files:
-                        parts = template_files[0].split('/')
-                        if len(parts) > 1:
-                            view_app = parts[0]
-                    
-                    # Choose a default app based on project context if no app is determined
-                    if not view_app and app_names:
-                        # Get app with views first as preferred default
-                        for app_name in app_names:
-                            # Use sync_to_async to handle DB query in async context
-                            from asgiref.sync import sync_to_async
-                            view_files_exist = await sync_to_async(lambda: ViewFile.objects.using('default').filter(
-                                project_id=self.project_id,
-                                path__contains=f"{app_name}/views"
-                            ).exists())()
-                            
-                            # Log detailed debug info
-                            logger.debug(f"Checking for views in app {app_name} for project {self.project_id}, exists: {view_files_exist}")
-                            
-                            if view_files_exist:
-                                view_app = app_name
-                                logger.info(f"Defaulting to app with existing views: {app_name}")
-                                break
-                    
-                    # If still no view app, use first app
-                    if not view_app and app_names:
-                        view_app = app_names[0]
-                        logger.info(f"Defaulting to first available app: {view_app}")
-                    
-                    # Extract needed functionality
-                    functionality_keywords = ['data', 'fetch', 'context', 'render', 'api', 'database']
-                    for keyword in functionality_keywords:
-                        if keyword in context_analysis.lower():
-                            view_functionality.append(keyword)
-                
-                # Always check for required views regardless of previous needs_view flag
-                if template_files:
-                    # Set needs_view to true if we have template files that likely need views
-                    needs_view = True
-                    logger.info(f"Templates require view updates: {template_files}")
-                
-                if needs_view:
-                    logger.info(f"AI analysis indicates view needed for app: {view_app} with functionality: {view_functionality}")
-                    
-                    # Get the right view path based on the determined app
-                    view_path = ""
-                    if view_app:
-                        view_path = f"{view_app}/views.py"
-                        logger.debug(f"Using view path: {view_path}")
-                    else:
-                        # Try to find any existing views.py file
-                        from asgiref.sync import sync_to_async
-                        
-                        # Add detailed debugging
-                        logger.debug("No view app determined, searching for any views.py file")
-                        
-                        # Get all view files for debugging
-                        all_view_files = await sync_to_async(lambda: list(ViewFile.objects.using('default').filter(
-                            project_id=self.project_id
-                        ).values_list('path', flat=True)))()
-                        
-                        logger.debug(f"All view files in project {self.project_id}: {all_view_files}")
-                        
-                        # Now search for views.py file
-                        view_file = await sync_to_async(lambda: ViewFile.objects.using('default').filter(
-                            project_id=self.project_id,
-                            path__contains="views.py"
-                        ).first())()
-                        
-                        if view_file:
-                            view_path = view_file.path
-                            logger.debug(f"Found view file: {view_path}")
-                        else:
-                            # Check specifically for posts/views.py if no other view file found
-                            posts_view = await sync_to_async(lambda: ViewFile.objects.using('default').filter(
-                                project_id=self.project_id,
-                                path__contains="posts/views.py"
-                            ).first())()
-                            
-                            if posts_view:
-                                view_path = posts_view.path
-                                logger.debug(f"Found posts/views.py file: {view_path}")
-                            else:
-                                # Default to a generic views.py if nothing else found
-                                view_path = "views.py"
-                                logger.debug("No view file found, using default views.py")
-                    
-                    # Generate a dynamic prompt for the view file with explicit instructions
-                    view_update_prompt = f"""
-Based on the request: "{self.last_message if hasattr(self, 'last_message') else ''}"
-
-Create Django view functionality to support template changes for analytics graphs.
-
-The template shows: {', '.join(template_files)}
-
-IMPORTANT REQUIREMENTS:
-1. Return ONLY clean code with no markdown formatting
-2. The view should be in the '{view_app if view_app else "appropriate"}' app directory 
-3. Include necessary imports for data processing (django.utils.timezone, django.db.models, etc.)
-4. Process relevant model data for the logged-in user
-5. Format data for chart display in the template
-
-Return a valid JSON object with the complete view file:
-{{
-    "files": {{
-        "{view_path}": "complete view file content with no markdown formatting"
-    }}
-}}
-"""
-                
-                # Make AI call for view file update
-                view_update_response = None
-                try:
-                    # Only make the call if we have a prompt
-                    if view_update_prompt:
-                        view_update_response = await make_ai_api_call(
-                            prompt=view_update_prompt,
-                            max_tokens=8192,
-                            temperature=0.2
-                        )
-                except Exception as e:
-                    logger.error(f"Error getting dynamic view updates: {str(e)}")
-                    
-                    if view_update_response:
-                        # Parse the response
-                        try:
-                            from core.services.json_validator import sanitize_ai_response
-                            sanitized_response = await sanitize_ai_response(view_update_response, detect_analytics=False, request_text=self.last_message)
-                            try:
-                                view_changes = json.loads(sanitized_response)
-                                if isinstance(view_changes, dict) and 'files' in view_changes:
-                                    # Add the view file to our collection
-                                    for view_path, view_content in view_changes['files'].items():
-                                        # Detect the feature dynamically from the file content
-                                        feature_context = self._analyze_request_context(view_content)
-                                        features = feature_context.get('features', [])
-                                        feature_types = ', '.join(features) if features else "required feature"
-                                        logger.info(f"Adding view file {view_path} for {feature_types}")
-                                        files[view_path] = view_content
-                                        
-                                        # If the response includes original content, add it to original_files
-                                        if 'original_files' in view_changes and view_path in view_changes['original_files']:
-                                            logger.debug(f"Adding original file content for {view_path}")
-                                            original_files[view_path] = view_changes['original_files'][view_path]
-                            except Exception as e:
-                                logger.error(f"Error parsing view update response: {str(e)}")
-                        except ImportError:
-                            # Fall back to direct JSON parsing if sanitize_ai_response not available
-                            try:
-                                view_changes = json.loads(view_update_response)
-                                if isinstance(view_changes, dict) and 'files' in view_changes:
-                                    for view_path, view_content in view_changes['files'].items():
-                                        # Detect the feature dynamically from the file content
-                                        feature_context = self._analyze_request_context(view_content)
-                                        features = feature_context.get('features', [])
-                                        feature_types = ', '.join(features) if features else "required feature"
-                                        logger.info(f"Adding view file {view_path} for {feature_types}")
-                                        files[view_path] = view_content
-                            except Exception as e:
-                                logger.error(f"Error parsing view update response (direct): {str(e)}")
-                except Exception as e:
-                    logger.error(f"Error getting dynamic view updates: {str(e)}")
-
-            # Continue normal processing with potentially added view files
-            for file_path, content in files.items():
-                try:
-                    # Normalize path for DB
-                    logger.debug(f"Processing file: {file_path}")
-                    original_path = file_path
-                    is_template = file_path.endswith('.html')
-                    is_view = 'views.py' in file_path or file_path.endswith('.py')
-                    is_static = file_path.startswith('static/')
-                    is_js = file_path.endswith('.js')
-                    is_css = file_path.endswith('.css')
-                    
-                    # Get normalized path
-                    if is_template:
-                        # For templates, we store them without the templates/ prefix in the DB
-                        normalized_path = file_path.replace('templates/', '')
-                        logger.debug(f"Normalized template path: {normalized_path}")
-                    else:
-                        normalized_path = file_path
-                    
-                    # Get the original content and file type
-                    file_exists = False
-                    original_content = ""
-                    
-                    # Check if we have original file content first
-                    if normalized_path in original_files:
-                        logger.debug(f"Using original file content from response for {normalized_path}")
-                        original_content = original_files[normalized_path]
-                        file_exists = True
-                    else:
-                        try:
-                            # Get original content from FileIndexer
-                            original_content = await self.get_file_content(normalized_path, self.project_id)
-                            if original_content is not None:
-                                file_exists = True
-                        except Exception as e:
-                            logger.warning(f"File {normalized_path} not found: {str(e)}")
-                            if is_static:
-                                # We'll create this static file
-                                logger.info(f"Will create new static file: {normalized_path}")
-                            else:
-                                logger.warning(f"Non-static file not found: {normalized_path}")
-                    
-                    # Determine file type
-                    if is_template:
-                        file_type = 'html'
-                    elif is_js:
-                        file_type = 'js'
-                    elif is_css:
-                        file_type = 'css'
-                    elif is_view:
-                        file_type = 'python'
-                    else:
-                        file_type = 'text'
-                    
-                    # Store metadata for dependency analysis
-                    file_metadata[normalized_path] = {
-                        'is_template': is_template,
-                        'is_view': is_view,
-                        'is_static': is_static,
-                        'is_js': is_js,
-                        'is_css': is_css,
-                        'app_name': normalized_path.split('/')[0] if '/' in normalized_path else None,
-                    }
-
-                    # Add to diff data
-                    diff_data['files'][normalized_path] = {
-                        'before': original_content,
-                        'after': content,
-                        'file_type': file_type,
-                        'is_new': not file_exists,
-                        'requires_view_update': is_template,
-                        'requires_static': is_static,
-                        'requires_template': is_template,
-                        'file_metadata': file_metadata[normalized_path]
-                    }
-                    processed_files.append(normalized_path)
-                    logger.info(f"Added file to changes: {normalized_path}")
-                except Exception as e:
-                    logger.error(f"Error processing file {file_path}: {str(e)}")
-                    logger.error(traceback.format_exc())
+                # Skip files with no changes
+                if original_content == new_content:
+                    logger.debug(f"No changes detected for {file_path}, skipping")
                     continue
 
-            # Log the complete diff data for debugging
-            logger.debug(f"Final diff data contains {len(diff_data['files'])} files")
+                # Add marker areas for additions/removals
+                changes_with_markers = self._add_marker_areas(original_content, new_content, file_path)
+                
+                # Determine file type
+                file_type = self._get_file_type(file_path)
+                
+                # Get the view file if this is a template file with features
+                if file_path.endswith('.html') and ('analytics' in feature_context or 'graph' in feature_context):
+                    try:
+                        view_file = await self.get_view_file_for_template([file_path])
+                        if view_file:
+                            logger.debug(f"Found associated view file for template: {view_file.path}")
+                            # Add the view file to the processed files if it's not already included
+                            if view_file.path not in files:
+                                # Generate appropriate view content based on template features
+                                view_content = await self.update_view_content(view_file.content, feature_context)
+                                
+                                # Add to the processed files list
+                                processed_files.append({
+                                    'filePath': view_file.path,
+                                    'content': view_content
+                                })
+                                
+                                # Add to diff data
+                                diff_data['files'][view_file.path] = {
+                                    'before': view_file.content,
+                                    'after': view_content,
+                                    'file_type': 'python',
+                                    'is_new': False,
+                                    'is_supporting': True  # Mark as a supporting file for the template
+                                }
+                    except Exception as e:
+                        logger.error(f"Error processing associated view file: {str(e)}")
+                
+                # Add to diff data
+                diff_data['files'][file_path] = {
+                    'before': original_content,
+                    'after': changes_with_markers,  # Use the content with markers
+                    'file_type': file_type,
+                    'is_new': is_new_file
+                }
+                
+                # Add to processed files list
+                processed_files.append({
+                    'filePath': file_path,
+                    'content': new_content
+                })
+                
+                # Add file metadata for better processing
+                file_metadata[file_path] = {
+                    'type': file_type,
+                    'is_new': is_new_file,
+                    'has_markers': True
+                }
+
+            if not diff_data['files']:
+                logger.warning("No changes identified in AI response")
+                await self.send_error_safe("No changes were identified")
+                return
+                
             for path in diff_data['files'].keys():
                 logger.debug(f"Including in diff: {path}")
 
@@ -2352,11 +2119,8 @@ Return a valid JSON object with the complete view file:
             )
             logger.info(f"Created change request ID: {change_request.id}")
 
-            # Prepare preview content
-            preview_content = await self.prepare_preview_content(files)
-
-            # Send diff modal data
-            await self.send_diff_modal(change_request.id, diff_data, processed_files, preview_content)
+            # Send diff modal data with complete content
+            await self.send_diff_modal(change_request.id, diff_data, processed_files)
             logger.info(f"Sent diff modal for change request {change_request.id}")
 
             # Send response with change request ID
@@ -2372,6 +2136,177 @@ Return a valid JSON object with the complete view file:
             logger.error(f"Error processing AI response: {str(e)}")
             logger.error(traceback.format_exc())
             await self.send_error_safe(f"Error processing AI response: {str(e)}")
+
+    def _add_marker_areas(self, original_content, new_content, file_path):
+        """
+        Add marker areas to indicate sections that should be added or removed.
+        Format:
+        <!-- DJANGO-AI-ADD-START -->
+        new content
+        <!-- DJANGO-AI-ADD-END -->
+        
+        <!-- DJANGO-AI-REMOVE-START -->
+        content to remove
+        <!-- DJANGO-AI-REMOVE-END -->
+        """
+        try:
+            # Split content into lines for diffing
+            original_lines = original_content.splitlines() if original_content else []
+            new_lines = new_content.splitlines() if new_content else []
+            
+            # Generate unified diff
+            diff = list(difflib.unified_diff(
+                original_lines,
+                new_lines,
+                n=0,  # No context lines to get exact changes only
+                lineterm=''
+            ))
+            
+            # Skip the header lines (first 2 lines)
+            diff = diff[2:] if len(diff) > 2 else diff
+            
+            result_lines = original_lines.copy()
+            offset = 0  # Track line offset as we insert/remove lines
+            
+            current_block = []
+            current_action = None
+            current_line = 0
+            
+            for line in diff:
+                if line.startswith('@@'):
+                    # Parse the @@ line to get starting line numbers
+                    # Format: @@ -start,count +start,count @@
+                    parts = line.split(' ')
+                    if len(parts) >= 3:
+                        # Extract line numbers
+                        old_start = int(parts[1].split(',')[0][1:])
+                        if ',' in parts[1]:
+                            old_count = int(parts[1].split(',')[1])
+                        else:
+                            old_count = 1
+                        
+                        new_start = int(parts[2].split(',')[0][1:]) 
+                        if ',' in parts[2]:
+                            new_count = int(parts[2].split(',')[1])
+                        else:
+                            new_count = 1
+                        
+                        current_line = old_start - 1  # Convert to 0-based index
+                        
+                        # Process any pending block before moving to new location
+                        if current_block and current_action:
+                            # Insert the current block with markers
+                            if current_action == '+':
+                                marker_start = "<!-- DJANGO-AI-ADD-START -->"
+                                marker_end = "<!-- DJANGO-AI-ADD-END -->"
+                            else:  # '-' action
+                                marker_start = "<!-- DJANGO-AI-REMOVE-START -->"
+                                marker_end = "<!-- DJANGO-AI-REMOVE-END -->"
+                                
+                            insert_pos = current_line + offset
+                            result_lines.insert(insert_pos, marker_start)
+                            offset += 1
+                            
+                            for i, content_line in enumerate(current_block):
+                                if current_action == '+':
+                                    result_lines.insert(insert_pos + i + offset, content_line[1:])
+                                    offset += 1
+                                # For removals, we don't need to do anything as the lines are already there
+                                
+                            result_lines.insert(insert_pos + len(current_block) + offset, marker_end)
+                            offset += 1
+                            
+                            # Reset the block
+                            current_block = []
+                            current_action = None
+                
+                elif line.startswith('+') or line.startswith('-'):
+                    # Store the line and action if it's in the same block
+                    if not current_action:
+                        current_action = line[0]
+                        current_block.append(line)
+                    elif line[0] == current_action:
+                        current_block.append(line)
+                    else:
+                        # Different action, process the current block
+                        if current_action == '+':
+                            marker_start = "<!-- DJANGO-AI-ADD-START -->"
+                            marker_end = "<!-- DJANGO-AI-ADD-END -->"
+                        else:  # '-' action
+                            marker_start = "<!-- DJANGO-AI-REMOVE-START -->"
+                            marker_end = "<!-- DJANGO-AI-REMOVE-END -->"
+                            
+                        insert_pos = current_line + offset
+                        result_lines.insert(insert_pos, marker_start)
+                        offset += 1
+                        
+                        for i, content_line in enumerate(current_block):
+                            if current_action == '+':
+                                result_lines.insert(insert_pos + i + 1, content_line[1:])
+                                offset += 1
+                            # For removals, we don't need to do anything
+                            
+                        result_lines.insert(insert_pos + len(current_block) + 1, marker_end)
+                        offset += 1
+                        
+                        # Reset and start new block
+                        current_block = [line]
+                        current_action = line[0]
+                        
+                    # Update current line for '-' lines (removals)
+                    if line.startswith('-'):
+                        current_line += 1
+            
+            # Process any remaining block
+            if current_block and current_action:
+                if current_action == '+':
+                    marker_start = "<!-- DJANGO-AI-ADD-START -->"
+                    marker_end = "<!-- DJANGO-AI-ADD-END -->"
+                else:  # '-' action
+                    marker_start = "<!-- DJANGO-AI-REMOVE-START -->"
+                    marker_end = "<!-- DJANGO-AI-REMOVE-END -->"
+                    
+                insert_pos = current_line + offset
+                result_lines.insert(insert_pos, marker_start)
+                offset += 1
+                
+                for i, content_line in enumerate(current_block):
+                    if current_action == '+':
+                        result_lines.insert(insert_pos + i + 1, content_line[1:])
+                        offset += 1
+                    
+                result_lines.insert(insert_pos + len(current_block) + 1, marker_end)
+            
+            # Apply special formatting for Python files
+            if file_path.endswith('.py'):
+                return self._format_python_markers("\n".join(result_lines))
+            
+            # For HTML templates
+            if file_path.endswith('.html'):
+                return self._format_html_markers("\n".join(result_lines))
+                
+            # Default case - return the result directly
+            return "\n".join(result_lines)
+        
+        except Exception as e:
+            logger.error(f"Error adding marker areas: {str(e)}")
+            logger.error(traceback.format_exc())
+            # Return original content as fallback
+            return new_content
+
+    def _format_python_markers(self, content):
+        """Format markers in Python code with appropriate comments"""
+        # Replace HTML-style markers with Python comments
+        content = content.replace("<!-- DJANGO-AI-ADD-START -->", "# DJANGO-AI-ADD-START")
+        content = content.replace("<!-- DJANGO-AI-ADD-END -->", "# DJANGO-AI-ADD-END")
+        content = content.replace("<!-- DJANGO-AI-REMOVE-START -->", "# DJANGO-AI-REMOVE-START")
+        content = content.replace("<!-- DJANGO-AI-REMOVE-END -->", "# DJANGO-AI-REMOVE-END")
+        return content
+
+    def _format_html_markers(self, content):
+        """Format markers in HTML templates with appropriate comments"""
+        # Already using HTML comments, just ensure proper formatting
+        return content
 
     @database_sync_to_async
     def get_file_content(self, file_path, project_id):

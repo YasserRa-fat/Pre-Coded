@@ -244,7 +244,7 @@ from django.test import RequestFactory
 from django.urls import reverse
 
 from create_api.models import Project, AIChangeRequest
-from create_api.views import preview_project
+from create_api.views import preview_project_with_alias as preview_project
 def run_preview_test(change, ai_diff_code=None):
     """Run a preview test for a change request"""
     # Clear import caches to avoid stale module issues (dynamic imports)

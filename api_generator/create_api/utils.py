@@ -889,3 +889,85 @@ async def process_chunked_response(chunks):
                 combined_files[file_path] = content
     
     return {'files': combined_files}
+
+def process_marked_changes(original_content, marked_content):
+    """
+    Process content with markers to apply changes to the original content.
+    Handles both additions and deletions marked in the content.
+    
+    Markers:
+    // BEGIN_CHANGE: description
+    new code
+    // END_CHANGE
+    
+    // DELETE_START: description
+    code to delete
+    // DELETE_END
+    """
+    logger = logging.getLogger(__name__)
+    
+    # If there are no markers, return the marked content as is
+    # This handles cases where the AI returns full file content
+    if not re.search(r'// (BEGIN_CHANGE|DELETE_START):', marked_content):
+        return marked_content
+        
+    try:
+        result = original_content
+        
+        # Extract BEGIN_CHANGE/END_CHANGE sections
+        add_pattern = r'// BEGIN_CHANGE: (.*?)\n(.*?)// END_CHANGE'
+        additions = re.findall(add_pattern, marked_content, re.DOTALL)
+        
+        # Extract DELETE_START/DELETE_END sections
+        delete_pattern = r'// DELETE_START: (.*?)\n(.*?)// DELETE_END'
+        deletions = re.findall(delete_pattern, marked_content, re.DOTALL)
+        
+        # Apply deletions first
+        for description, content_to_delete in deletions:
+            logger.debug(f"Applying deletion: {description}")
+            clean_content = content_to_delete.strip()
+            if clean_content in result:
+                result = result.replace(clean_content, '')
+            else:
+                logger.warning(f"Content to delete not found: {clean_content[:100]}...")
+        
+        # Then apply additions
+        for description, content_to_add in additions:
+            logger.debug(f"Applying addition: {description}")
+            
+            # Try to determine insertion point based on description
+            # Look for patterns like "after function X" or "before class Y"
+            insertion_point = len(result)  # Default to end of file
+            
+            # Common insertion patterns in description
+            if "import" in description.lower():
+                # Add after last import statement
+                import_matches = list(re.finditer(r'^(import|from)\s+.*$', result, re.MULTILINE))
+                if import_matches:
+                    last_import = import_matches[-1]
+                    insertion_point = last_import.end() + 1
+            elif "class" in description.lower():
+                # Find the mentioned class
+                class_name = re.search(r'class\s+(\w+)', description)
+                if class_name:
+                    class_pattern = f"class {class_name.group(1)}"
+                    class_match = re.search(class_pattern, result)
+                    if class_match:
+                        insertion_point = class_match.start()
+            elif "function" in description.lower() or "method" in description.lower():
+                # Find the mentioned function
+                func_name = re.search(r'(function|method)\s+(\w+)', description)
+                if func_name:
+                    func_pattern = f"def {func_name.group(2)}"
+                    func_match = re.search(func_pattern, result)
+                    if func_match:
+                        insertion_point = func_match.start()
+            
+            # Fall back to appending at the end if no specific point found
+            result = result[:insertion_point] + "\n" + content_to_add + "\n" + result[insertion_point:]
+        
+        return result
+    except Exception as e:
+        logger.error(f"Error processing marked changes: {str(e)}")
+        # Return the original marked content as a fallback
+        return marked_content
